@@ -1,0 +1,17 @@
+{
+  "name": "chacc_notifications",
+  "display_name": "Notifications Module",
+  "version": "0.1.0",
+  "author": "ChaCC API Team",
+  "description": "A ChaCC module providing notification functionality via templates and adapters.",
+  "entry_point": "chacc_notifications_src.main:setup_plugin",
+  "test_entry_point": "chacc_notifications_src.tests.test_module:run_module_tests",
+  "base_path_prefix": "/notifications",
+  "dependencies_file": "requirements.txt",
+  "required_chacc_version": ">=1.0.0",
+  "license": "MIT",
+  "tags": [
+    "ChaCC Notifications"
+  ],
+  "homepage": "https://github.com/jonas1015/chacc_notifications"
+}
