@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from chacc_api import BackboneContext
 from typing import Optional
 
-from .routes import router as chacc_notifications_router
+from .routes import router as chacc_messaging_router
 from .context_factory import get_context, set_module_context
 from .config import get_notification_config
 from .adapters import NotificationAdapterRegistry, ConsoleNotificationAdapter, EmailNotificationAdapter
@@ -20,7 +20,7 @@ async def health_check():
 
     return {
         "status": "healthy",
-        "module": "chacc_notifications",
+        "module": "chacc_messaging",
         "adapter": backend,
     }
 
@@ -29,7 +29,7 @@ def setup_plugin(context: Optional[BackboneContext] = None):
     _module_context = get_context(context)
     set_module_context(_module_context)
 
-    _module_context.logger.info("chacc_notifications: Setup initiated!")
+    _module_context.logger.info("chacc_messaging: Setup initiated!")
 
     config = get_notification_config(_module_context)
 
@@ -58,13 +58,13 @@ def setup_plugin(context: Optional[BackboneContext] = None):
 
     _module_context.register_service("notification_service", notification_service)
 
-    chacc_notifications_router.include_router(health_router)
-    return chacc_notifications_router
+    chacc_messaging_router.include_router(health_router)
+    return chacc_messaging_router
 
 
 def get_plugin_info():
     return {
-        "name": "chacc_notifications",
+        "name": "chacc_messaging",
         "display_name": "Notifications Module",
         "version": "0.1.0",
         "author": "ChaCC API Team",

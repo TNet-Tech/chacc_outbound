@@ -57,6 +57,17 @@ async def get_db():
     return await anext(context.get_db())
 
 
+def get_notification_service():
+    """Get notification service from module context."""
+    context = get_module_context()
+    if context is None:
+        raise HTTPException(status_code=500, detail="Module not initialized")
+    service = context.get_service("notification_service")
+    if service is None:
+        raise HTTPException(status_code=500, detail="Notification service not initialized")
+    return service
+
+
 async def get_redis_client():
     """Get Redis client from module context."""
     context = get_module_context()

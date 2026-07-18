@@ -32,15 +32,18 @@ class NotificationService:
         recipient_id: str,
         recipient_contact: str,
         variables: dict,
-        channel: str = "email",
+        module_name: str,
+        channel: Optional[str] = None,
         metadata: Optional[dict] = None,
-        module_context=None,
+        overrides: Optional[dict] = None,
     ) -> Notification:
-        template = self._get_template(db, template_key)
+        template = self._get_template_by_key(db, template_key, module_name)
         if not template:
             raise TemplateNotFoundError(template_key)
 
         self._validate_variables(template, variables)
+
+        effective_channel = channel or template.channel
 
         subject = None
         body = None
@@ -50,9 +53,9 @@ class NotificationService:
 
         notification = Notification(
             template_id=template.id,
-            module_name=template.module_name,
+            module_name=module_name,
             recipient_id=recipient_id,
-            channel=channel,
+            channel=effective_channel,
             recipient_contact=recipient_contact,
             subject=subject,
             body=body,
@@ -67,7 +70,48 @@ class NotificationService:
                 notification_id=notification.id,
                 template=template,
                 variables=variables,
-                module_context=module_context or self.module_context,
+                overrides=overrides,
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+        return notification
+
+    async def send_direct(
+        self,
+        db,
+        recipient_id: str,
+        recipient_contact: str,
+        body: str,
+        module_name: str,
+        subject: Optional[str] = None,
+        channel: str = "email",
+        adapter_name: str = "console",
+        metadata: Optional[dict] = None,
+        overrides: Optional[dict] = None,
+    ) -> Notification:
+        notification = Notification(
+            template_id=None,
+            module_name=module_name,
+            recipient_id=recipient_id,
+            channel=channel,
+            recipient_contact=recipient_contact,
+            subject=subject,
+            body=body,
+            notification_metadata=metadata,
+            status=NotificationStatus.PENDING,
+        )
+        db.add(notification)
+        db.flush()
+
+        task = asyncio.create_task(
+            self._deliver_async(
+                notification_id=notification.id,
+                template=None,
+                variables=None,
+                adapter_name=adapter_name,
+                overrides=overrides,
             )
         )
         self._tasks.add(task)
@@ -78,11 +122,12 @@ class NotificationService:
     async def _deliver_async(
         self,
         notification_id: int,
-        template: NotificationTemplate,
-        variables: dict,
-        module_context=None,
+        template: Optional[NotificationTemplate] = None,
+        variables: Optional[dict] = None,
+        adapter_name: Optional[str] = None,
+        overrides: Optional[dict] = None,
     ) -> None:
-        context = module_context or self.module_context
+        context = self.module_context
         db = None
         try:
             if context:
@@ -95,12 +140,13 @@ class NotificationService:
                 return
 
             mapping = self._get_module_mapping(db, notification.module_name)
-            max_retries = mapping.max_retry_attempts if mapping else 3
-            backoff = mapping.retry_backoff_seconds if mapping else 300
+            max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
+            backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
+            effective_adapter_name = adapter_name or (template.adapter_name if template else "console")
             adapter = self.adapters.get(
                 channel=notification.channel,
-                adapter_name=template.adapter_name,
+                adapter_name=effective_adapter_name,
             )
 
             last_error = None
@@ -111,8 +157,10 @@ class NotificationService:
                         template=template,
                         recipient_id=notification.recipient_id,
                         recipient_contact=notification.recipient_contact,
-                        variables=variables,
+                        variables=variables or {},
                         metadata=notification.notification_metadata,
+                        subject=notification.subject,
+                        body=notification.body,
                     )
 
                     if result.status == "sent":
@@ -165,6 +213,19 @@ class NotificationService:
                     db.close()
                 except Exception:
                     pass
+
+    def _apply_overrides(
+        self,
+        mapping: Optional[ModuleNotificationMapping],
+        key: str,
+        default: int,
+        overrides: Optional[dict],
+    ) -> int:
+        if overrides and key in overrides:
+            return overrides[key]
+        if mapping and hasattr(mapping, key) and getattr(mapping, key) is not None:
+            return getattr(mapping, key)
+        return default
 
     async def create_template(
         self,
@@ -247,6 +308,18 @@ class NotificationService:
         db.flush()
         return mapping
 
+    def get_notification(self, db, notification_uuid: str) -> Optional[Notification]:
+        result = db.execute(
+            select(Notification).where(Notification.uuid == notification_uuid)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_status(self, db, notification_uuid: str) -> Optional[NotificationStatus]:
+        notification = self.get_notification(db, notification_uuid)
+        if notification:
+            return notification.status
+        return None
+
     def _get_template(self, db, template_key: str) -> Optional[NotificationTemplate]:
         result = db.execute(
             select(NotificationTemplate).where(
@@ -263,6 +336,7 @@ class NotificationService:
             select(NotificationTemplate).where(
                 NotificationTemplate.template_key == template_key,
                 NotificationTemplate.module_name == module_name,
+                NotificationTemplate.is_active == True,
             )
         )
         return result.scalar_one_or_none()

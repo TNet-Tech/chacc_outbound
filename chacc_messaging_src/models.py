@@ -34,7 +34,7 @@ class NotificationTemplate(ChaCCBaseModel):
 class Notification(ChaCCBaseModel):
     __tablename__ = "notifications"
 
-    template_id = Column(Integer, nullable=False)
+    template_id = Column(Integer, nullable=True)
     module_name = Column(String(100), nullable=False)
     recipient_id = Column(String(100), nullable=False)
     channel = Column(String(50), nullable=False)

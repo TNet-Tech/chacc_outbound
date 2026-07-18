@@ -40,6 +40,8 @@ class BaseNotificationAdapter(ABC):
         recipient_contact: str,
         variables: dict,
         metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
     ) -> SendResult:
         """Send notification via this adapter's channel."""
         pass

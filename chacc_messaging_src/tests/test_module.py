@@ -1,5 +1,5 @@
 """
-Tests for chacc_notifications module.
+Tests for chacc_messaging module.
 """
 import pytest
 import sys

@@ -25,6 +25,8 @@ class EmailNotificationAdapter(BaseNotificationAdapter):
         recipient_contact: str,
         variables: dict,
         metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
     ) -> SendResult:
         try:
             if not await self.validate_contact(recipient_contact):
@@ -33,21 +35,25 @@ class EmailNotificationAdapter(BaseNotificationAdapter):
                     error_message="Invalid email address",
                 )
 
-            subject_template_obj = self.jinja_env.from_string(
-                template.subject_template or ""
-            )
-            subject = subject_template_obj.render(**variables)
+            if template:
+                subject_template_obj = self.jinja_env.from_string(
+                    template.subject_template or ""
+                )
+                subject = subject_template_obj.render(**variables)
 
-            body_template_obj = self.jinja_env.from_string(
-                template.body_template
-            )
-            body = body_template_obj.render(**variables)
+                body_template_obj = self.jinja_env.from_string(
+                    template.body_template
+                )
+                body = body_template_obj.render(**variables)
+            else:
+                subject = subject or ""
+                body = body or ""
 
             message_id = await self._send_email(
                 to=recipient_contact,
                 subject=subject,
                 body=body,
-                is_html=(template.email_type == "html"),
+                is_html=(template.email_type == "html" if template else False),
             )
 
             return SendResult(

@@ -14,7 +14,7 @@ A ChaCC API module providing template-driven notification delivery via adapters.
 This module uses environment variables from the main `.env` file at project root.
 Use the naming convention: `{MODULE_NAME}_{VAR_NAME}` in uppercase.
 
-For example, if your module is named `chacc_notifications`:
+For example, if your module is named `chacc_messaging`:
 ```bash
 # In .env file at project root
 CHACC_NOTIFICATIONS_EMAIL_BACKEND=console
@@ -36,7 +36,7 @@ This module is automatically loaded by the ChaCC backbone when it's placed in th
 Run tests using pytest:
 
 ```bash
-pytest plugins/chacc_notifications/chacc_notifications_src/tests/ -v
+pytest plugins/chacc_messaging/chacc_messaging_src/tests/ -v
 ```
 
 ## Configuration

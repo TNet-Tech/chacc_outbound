@@ -20,18 +20,26 @@ class ConsoleNotificationAdapter(BaseNotificationAdapter):
         recipient_contact: str,
         variables: dict,
         metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
     ) -> SendResult:
-        subject_tmpl = self.jinja_env.from_string(template.subject_template or "")
-        body_tmpl = self.jinja_env.from_string(template.body_template)
-
-        subject = subject_tmpl.render(**variables)
-        body = body_tmpl.render(**variables)
+        if template:
+            subject_tmpl = self.jinja_env.from_string(template.subject_template or "")
+            subject = subject_tmpl.render(**variables)
+            body_tmpl = self.jinja_env.from_string(template.body_template)
+            body = body_tmpl.render(**variables)
+        else:
+            subject = subject or ""
+            body = body or ""
 
         print(f"\n{'='*80}")
         print(f"NOTIFICATION (Console Backend)")
         print(f"{'='*80}")
         print(f"Notification ID: {notification_id}")
-        print(f"Template: {template.template_key}")
+        if template:
+            print(f"Template: {template.template_key}")
+        else:
+            print(f"Template: (direct send)")
         print(f"Recipient: {recipient_contact}")
         print(f"Subject: {subject}")
         print(f"{'-'*80}")

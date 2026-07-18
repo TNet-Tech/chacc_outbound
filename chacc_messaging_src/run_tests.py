@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone test runner for chacc_notifications module.
+Standalone test runner for chacc_messaging module.
 This script runs the module's tests without depending on the backbone.
 """
 import sys
