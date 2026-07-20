@@ -4,9 +4,9 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 
 from .context_factory import get_db, get_module_context, get_notification_service
-from .models import NotificationTemplate, Notification, ModuleNotificationMapping, NotificationStatus
-from .service import NotificationService
-from .adapters import NotificationAdapterRegistry
+from .models import MessagingTemplate, Messaging, ModuleMessagingMapping, MessagingStatus
+from .service import MessagingService
+from .adapters import MessagingAdapterRegistry
 from .exceptions import TemplateNotFoundError, AdapterNotFoundError, VariableValidationError
 
 
@@ -27,8 +27,8 @@ class SendDirectNotificationRequest(BaseModel):
     module_name: str = Field(..., description="Module name sending the notification")
     recipient_id: str = Field(..., description="User/entity identifier")
     recipient_contact: str = Field(..., description="Email address or phone number")
-    subject: Optional[str] = Field(default=None, description="Notification subject (required for email, ignored for SMS)")
-    body: str = Field(..., description="Notification body content")
+    subject: Optional[str] = Field(default=None, description="Message subject (required for email, ignored for SMS)")
+    body: str = Field(..., description="Message body content")
     channel: str = Field(default="email", description="Channel to use")
     adapter_name: str = Field(default="console", description="Adapter to use")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
@@ -45,7 +45,7 @@ class CreateTemplateRequest(BaseModel):
     description: Optional[str] = Field(default=None, description="Template description")
 
 
-class NotificationResponse(BaseModel):
+class MessagingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -64,7 +64,7 @@ class NotificationResponse(BaseModel):
     last_error: Optional[str]
 
 
-class NotificationTemplateResponse(BaseModel):
+class MessagingTemplateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -80,10 +80,10 @@ class NotificationTemplateResponse(BaseModel):
     is_active: bool
 
 
-@router.post("/send", response_model=NotificationResponse)
+@router.post("/send", response_model=MessagingResponse)
 async def send_notification(
     payload: SendNotificationRequest,
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     try:
@@ -98,7 +98,7 @@ async def send_notification(
             metadata=payload.metadata,
         )
         db.commit()
-        return NotificationResponse(
+        return MessagingResponse(
             id=notification.id,
             template_id=notification.template_id,
             module_name=notification.module_name,
@@ -123,10 +123,10 @@ async def send_notification(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/send-direct", response_model=NotificationResponse)
+@router.post("/send-direct", response_model=MessagingResponse)
 async def send_direct_notification(
     payload: SendDirectNotificationRequest,
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     try:
@@ -142,7 +142,7 @@ async def send_direct_notification(
             metadata=payload.metadata,
         )
         db.commit()
-        return NotificationResponse(
+        return MessagingResponse(
             id=notification.id,
             template_id=notification.template_id,
             module_name=notification.module_name,
@@ -163,10 +163,10 @@ async def send_direct_notification(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/templates", response_model=NotificationTemplateResponse, status_code=201)
+@router.post("/templates", response_model=MessagingTemplateResponse, status_code=201)
 async def create_template(
     payload: CreateTemplateRequest,
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     try:
@@ -185,7 +185,7 @@ async def create_template(
             description=payload.description,
         )
         db.commit()
-        return NotificationTemplateResponse(
+        return MessagingTemplateResponse(
             id=template.id,
             template_key=template.template_key,
             module_name=template.module_name,
@@ -204,15 +204,15 @@ async def create_template(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/templates", response_model=List[NotificationTemplateResponse])
+@router.get("/templates", response_model=List[MessagingTemplateResponse])
 async def list_templates(
     module_name: Optional[str] = Query(None, description="Filter by module name"),
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     templates = service.list_templates(db, module_name)
     return [
-        NotificationTemplateResponse(
+        MessagingTemplateResponse(
             id=t.id,
             template_key=t.template_key,
             module_name=t.module_name,
@@ -229,27 +229,27 @@ async def list_templates(
     ]
 
 
-@router.get("/notifications", response_model=List[NotificationResponse])
+@router.get("/notifications", response_model=List[MessagingResponse])
 async def list_notifications(
     module_name: Optional[str] = Query(None, description="Filter by module name"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
     status: Optional[str] = Query(None, description="Filter by status"),
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
-    stmt = select(Notification)
+    stmt = select(Messaging)
     if module_name:
-        stmt = stmt.where(Notification.module_name == module_name)
+        stmt = stmt.where(Messaging.module_name == module_name)
     if channel:
-        stmt = stmt.where(Notification.channel == channel)
+        stmt = stmt.where(Messaging.channel == channel)
     if status:
-        stmt = stmt.where(Notification.status == status)
-    stmt = stmt.order_by(Notification.created_at.desc())
+        stmt = stmt.where(Messaging.status == status)
+    stmt = stmt.order_by(Messaging.created_at.desc())
     result = db.execute(stmt)
     notifications = result.scalars().all()
 
     return [
-        NotificationResponse(
+        MessagingResponse(
             id=n.id,
             uuid=n.uuid,
             template_id=n.template_id,
@@ -269,16 +269,16 @@ async def list_notifications(
     ]
 
 
-@router.get("/notifications/{notification_uuid}", response_model=NotificationResponse)
+@router.get("/notifications/{notification_uuid}", response_model=MessagingResponse)
 async def get_notification(
     notification_uuid: str,
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     notification = service.get_notification(db, notification_uuid)
     if not notification:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    return NotificationResponse(
+        raise HTTPException(status_code=404, detail="Message not found")
+    return MessagingResponse(
         id=notification.id,
         uuid=notification.uuid,
         template_id=notification.template_id,
@@ -299,10 +299,10 @@ async def get_notification(
 @router.get("/notifications/{notification_uuid}/status")
 async def get_notification_status(
     notification_uuid: str,
-    service: NotificationService = Depends(get_notification_service),
+    service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
     status = await service.get_status(db, notification_uuid)
     if status is None:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(status_code=404, detail="Message not found")
     return {"notification_uuid": notification_uuid, "status": status.value}

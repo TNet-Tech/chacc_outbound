@@ -5,24 +5,26 @@ from typing import Optional
 from sqlalchemy import select
 from jinja2 import Environment, StrictUndefined
 
-from .models import NotificationTemplate, Notification, ModuleNotificationMapping, NotificationStatus
-from .adapters import NotificationAdapterRegistry
+from .models import MessagingTemplate, Messaging, ModuleMessagingMapping, MessagingStatus
+from .adapters import MessagingAdapterRegistry
 from .exceptions import TemplateNotFoundError, VariableValidationError, AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
 jinja_env = Environment(undefined=StrictUndefined)
 
 
-class NotificationService:
+class MessagingService:
     def __init__(
         self,
-        adapter_registry: NotificationAdapterRegistry,
+        adapter_registry: MessagingAdapterRegistry,
         config: dict,
         module_context=None,
+        redis=None,
     ):
         self.adapters = adapter_registry
         self.config = config
         self.module_context = module_context
+        self.redis = redis
         self._tasks: set = set()
 
     async def send(
@@ -36,7 +38,7 @@ class NotificationService:
         channel: Optional[str] = None,
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
-    ) -> Notification:
+    ) -> Messaging:
         template = self._get_template_by_key(db, template_key, module_name)
         if not template:
             raise TemplateNotFoundError(template_key)
@@ -45,13 +47,23 @@ class NotificationService:
 
         effective_channel = channel or template.channel
 
+        mapping = self._get_module_mapping(db, module_name)
+        rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
+        if rate_limit and self.redis:
+            key = f"messaging:rate:{module_name}:{effective_channel}"
+            current = await self.redis.incr(key)
+            if current == 1:
+                await self.redis.expire(key, 60)
+            if current > rate_limit:
+                raise AdapterNotFoundError(effective_channel, f"rate_limit_exceeded:{rate_limit}")
+
         subject = None
         body = None
         if template.subject_template:
             subject = jinja_env.from_string(template.subject_template).render(**variables)
         body = jinja_env.from_string(template.body_template).render(**variables)
 
-        notification = Notification(
+        notification = Messaging(
             template_id=template.id,
             module_name=module_name,
             recipient_id=recipient_id,
@@ -60,14 +72,14 @@ class NotificationService:
             subject=subject,
             body=body,
             notification_metadata=metadata,
-            status=NotificationStatus.PENDING,
+            status=MessagingStatus.PENDING,
         )
         db.add(notification)
         db.flush()
 
         task = asyncio.create_task(
             self._deliver_async(
-                notification_id=notification.id,
+                messaging_id=notification.id,
                 template=template,
                 variables=variables,
                 overrides=overrides,
@@ -90,8 +102,18 @@ class NotificationService:
         adapter_name: str = "console",
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
-    ) -> Notification:
-        notification = Notification(
+    ) -> Messaging:
+        mapping = self._get_module_mapping(db, module_name)
+        rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
+        if rate_limit and self.redis:
+            key = f"messaging:rate:{module_name}:{channel}"
+            current = await self.redis.incr(key)
+            if current == 1:
+                await self.redis.expire(key, 60)
+            if current > rate_limit:
+                raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
+
+        notification = Messaging(
             template_id=None,
             module_name=module_name,
             recipient_id=recipient_id,
@@ -100,14 +122,14 @@ class NotificationService:
             subject=subject,
             body=body,
             notification_metadata=metadata,
-            status=NotificationStatus.PENDING,
+            status=MessagingStatus.PENDING,
         )
         db.add(notification)
         db.flush()
 
         task = asyncio.create_task(
             self._deliver_async(
-                notification_id=notification.id,
+                messaging_id=notification.id,
                 template=None,
                 variables=None,
                 adapter_name=adapter_name,
@@ -121,8 +143,8 @@ class NotificationService:
 
     async def _deliver_async(
         self,
-        notification_id: int,
-        template: Optional[NotificationTemplate] = None,
+        messaging_id: int,
+        template: Optional[MessagingTemplate] = None,
         variables: Optional[dict] = None,
         adapter_name: Optional[str] = None,
         overrides: Optional[dict] = None,
@@ -135,17 +157,17 @@ class NotificationService:
             else:
                 return
 
-            notification = db.get(Notification, notification_id)
-            if not notification:
+            messaging = db.get(Messaging, messaging_id)
+            if not messaging:
                 return
 
-            mapping = self._get_module_mapping(db, notification.module_name)
+            mapping = self._get_module_mapping(db, messaging.module_name)
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
             effective_adapter_name = adapter_name or (template.adapter_name if template else "console")
             adapter = self.adapters.get(
-                channel=notification.channel,
+                channel=messaging.channel,
                 adapter_name=effective_adapter_name,
             )
 
@@ -153,29 +175,29 @@ class NotificationService:
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await adapter.send(
-                        notification_id=str(notification.id),
+                        messaging_id=str(messaging.id),
                         template=template,
-                        recipient_id=notification.recipient_id,
-                        recipient_contact=notification.recipient_contact,
+                        recipient_id=messaging.recipient_id,
+                        recipient_contact=messaging.recipient_contact,
                         variables=variables or {},
-                        metadata=notification.notification_metadata,
-                        subject=notification.subject,
-                        body=notification.body,
+                        metadata=messaging.notification_metadata,
+                        subject=messaging.subject,
+                        body=messaging.body,
                     )
 
                     if result.status == "sent":
-                        notification.status = NotificationStatus.SENT
-                        notification.sent_at = datetime.utcnow()
-                        notification.attempts = attempt
+                        messaging.status = MessagingStatus.SENT
+                        messaging.sent_at = datetime.utcnow()
+                        messaging.attempts = attempt
                         if result.error_message:
-                            notification.last_error = result.error_message
+                            messaging.last_error = result.error_message
                         db.commit()
                         return
 
                     last_error = result.error_message or "Unknown error"
-                    notification.status = NotificationStatus.RETRYING
-                    notification.last_error = last_error
-                    notification.attempts = attempt
+                    messaging.status = MessagingStatus.RETRYING
+                    messaging.last_error = last_error
+                    messaging.attempts = attempt
                     db.commit()
 
                     if attempt < max_retries:
@@ -184,26 +206,26 @@ class NotificationService:
 
                 except Exception as e:
                     last_error = str(e)
-                    notification.status = NotificationStatus.RETRYING
-                    notification.last_error = last_error
-                    notification.attempts = attempt
+                    messaging.status = MessagingStatus.RETRYING
+                    messaging.last_error = last_error
+                    messaging.attempts = attempt
                     db.commit()
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
 
-            notification.status = NotificationStatus.FAILED
-            notification.last_error = last_error or "Max retries exceeded"
+            messaging.status = MessagingStatus.FAILED
+            messaging.last_error = last_error or "Max retries exceeded"
             db.commit()
 
         except Exception as e:
             if db:
                 try:
-                    notification = db.get(Notification, notification_id)
-                    if notification:
-                        notification.status = NotificationStatus.FAILED
-                        notification.last_error = str(e)
+                    messaging = db.get(Messaging, messaging_id)
+                    if messaging:
+                        messaging.status = MessagingStatus.FAILED
+                        messaging.last_error = str(e)
                         db.commit()
                 except Exception:
                     pass
@@ -216,7 +238,7 @@ class NotificationService:
 
     def _apply_overrides(
         self,
-        mapping: Optional[ModuleNotificationMapping],
+        mapping: Optional[ModuleMessagingMapping],
         key: str,
         default: int,
         overrides: Optional[dict],
@@ -239,14 +261,14 @@ class NotificationService:
         email_type: Optional[str] = None,
         variables_schema: Optional[dict] = None,
         description: Optional[str] = None,
-    ) -> NotificationTemplate:
+    ) -> MessagingTemplate:
         existing = self._get_template_by_key(db, template_key, module_name)
         if existing:
             raise ValueError(
                 f"Template '{template_key}' already exists for module '{module_name}'"
             )
 
-        template = NotificationTemplate(
+        template = MessagingTemplate(
             template_key=template_key,
             module_name=module_name,
             channel=channel,
@@ -263,16 +285,16 @@ class NotificationService:
         return template
 
     def list_templates(self, db, module_name: Optional[str] = None):
-        stmt = select(NotificationTemplate)
+        stmt = select(MessagingTemplate)
         if module_name:
-            stmt = stmt.where(NotificationTemplate.module_name == module_name)
+            stmt = stmt.where(MessagingTemplate.module_name == module_name)
         result = db.execute(stmt)
         return result.scalars().all()
 
-    def get_module_mapping(self, db, module_name: str) -> Optional[ModuleNotificationMapping]:
+    def get_module_mapping(self, db, module_name: str) -> Optional[ModuleMessagingMapping]:
         result = db.execute(
-            select(ModuleNotificationMapping).where(
-                ModuleNotificationMapping.module_name == module_name
+            select(ModuleMessagingMapping).where(
+                ModuleMessagingMapping.module_name == module_name
             )
         )
         return result.scalar_one_or_none()
@@ -281,67 +303,87 @@ class NotificationService:
         self,
         db,
         module_name: str,
+        default_adapter_name: Optional[str] = None,
+        default_channel: Optional[str] = None,
+        default_template_key: Optional[str] = None,
         default_channels: Optional[list] = None,
         max_retry_attempts: Optional[int] = None,
         retry_backoff_seconds: Optional[int] = None,
+        rate_limit_per_minute: Optional[int] = None,
+        is_active: Optional[bool] = None,
         description: Optional[str] = None,
-    ) -> ModuleNotificationMapping:
+    ) -> ModuleMessagingMapping:
         mapping = self.get_module_mapping(db, module_name)
         if mapping:
+            if default_adapter_name is not None:
+                mapping.default_adapter_name = default_adapter_name
+            if default_channel is not None:
+                mapping.default_channel = default_channel
+            if default_template_key is not None:
+                mapping.default_template_key = default_template_key
             if default_channels is not None:
                 mapping.default_channels = default_channels
             if max_retry_attempts is not None:
                 mapping.max_retry_attempts = max_retry_attempts
             if retry_backoff_seconds is not None:
                 mapping.retry_backoff_seconds = retry_backoff_seconds
+            if rate_limit_per_minute is not None:
+                mapping.rate_limit_per_minute = rate_limit_per_minute
+            if is_active is not None:
+                mapping.is_active = is_active
             if description is not None:
                 mapping.description = description
         else:
-            mapping = ModuleNotificationMapping(
+            mapping = ModuleMessagingMapping(
                 module_name=module_name,
+                default_adapter_name=default_adapter_name or "console",
+                default_channel=default_channel or "email",
+                default_template_key=default_template_key,
                 default_channels=default_channels or ["email"],
                 max_retry_attempts=max_retry_attempts or 3,
                 retry_backoff_seconds=retry_backoff_seconds or 300,
+                rate_limit_per_minute=rate_limit_per_minute,
+                is_active=is_active if is_active is not None else True,
                 description=description,
             )
             db.add(mapping)
         db.flush()
         return mapping
 
-    def get_notification(self, db, notification_uuid: str) -> Optional[Notification]:
+    def get_notification(self, db, notification_uuid: str) -> Optional[Messaging]:
         result = db.execute(
-            select(Notification).where(Notification.uuid == notification_uuid)
+            select(Messaging).where(Messaging.uuid == notification_uuid)
         )
         return result.scalar_one_or_none()
 
-    async def get_status(self, db, notification_uuid: str) -> Optional[NotificationStatus]:
+    async def get_status(self, db, notification_uuid: str) -> Optional[MessagingStatus]:
         notification = self.get_notification(db, notification_uuid)
         if notification:
             return notification.status
         return None
 
-    def _get_template(self, db, template_key: str) -> Optional[NotificationTemplate]:
+    def _get_template(self, db, template_key: str) -> Optional[MessagingTemplate]:
         result = db.execute(
-            select(NotificationTemplate).where(
-                NotificationTemplate.template_key == template_key,
-                NotificationTemplate.is_active == True,
+            select(MessagingTemplate).where(
+                MessagingTemplate.template_key == template_key,
+                MessagingTemplate.is_active == True,
             )
         )
         return result.scalar_one_or_none()
 
     def _get_template_by_key(
         self, db, template_key: str, module_name: str
-    ) -> Optional[NotificationTemplate]:
+    ) -> Optional[MessagingTemplate]:
         result = db.execute(
-            select(NotificationTemplate).where(
-                NotificationTemplate.template_key == template_key,
-                NotificationTemplate.module_name == module_name,
-                NotificationTemplate.is_active == True,
+            select(MessagingTemplate).where(
+                MessagingTemplate.template_key == template_key,
+                MessagingTemplate.module_name == module_name,
+                MessagingTemplate.is_active == True,
             )
         )
         return result.scalar_one_or_none()
 
-    def _validate_variables(self, template: NotificationTemplate, variables: dict) -> None:
+    def _validate_variables(self, template: MessagingTemplate, variables: dict) -> None:
         schema = template.variables_schema or {}
 
         for var_name, var_spec in schema.items():

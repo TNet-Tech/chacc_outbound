@@ -1,66 +1,541 @@
-# ChaccNotifications Module
+# chacc_messaging
 
-A ChaCC API module providing template-driven notification delivery via adapters.
+A ChaCC module providing **email and SMS messaging** via templates and adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
 
 ## Features
 
-- Template registration with Jinja2 rendering
-- Adapter-based channel delivery (Email, Console)
-- Async fire-and-forget notification sending
-- Module notification mappings and retry policies
-
-## Environment Variables
-
-This module uses environment variables from the main `.env` file at project root.
-Use the naming convention: `{MODULE_NAME}_{VAR_NAME}` in uppercase.
-
-For example, if your module is named `chacc_messaging`:
-```bash
-# In .env file at project root
-CHACC_NOTIFICATIONS_EMAIL_BACKEND=console
-CHACC_NOTIFICATIONS_EMAIL_SMTP_HOST=smtp.example.com
-CHACC_NOTIFICATIONS_EMAIL_SMTP_PORT=587
-CHACC_NOTIFICATIONS_EMAIL_SMTP_USERNAME=user
-CHACC_NOTIFICATIONS_EMAIL_SMTP_PASSWORD=pass
-CHACC_NOTIFICATIONS_EMAIL_SMTP_FROM=noreply@example.com
-```
+- **Template-based sending**: Render messages with Jinja2 templates and validated variable schemas
+- **Direct sends**: Bypass templates and send raw content instantly
+- **Email (HTML/Text)**: SMTP adapter + console adapter for development
+- **SMS**: Extensible adapter pattern for SMS providers (Twilio, etc.)
+- **Retry & backoff**: Automatic retries with configurable backoff per module
+- **Async delivery**: Fire-and-forget with status tracking
+- **Programmatic API**: Other modules use `MessagingService` directly — no HTTP required
+- **REST API**: Admin endpoints for templates, notifications, and sending
 
 ## Installation
 
-This module is automatically loaded by the ChaCC backbone when it's placed in the `plugins/` directory.
+1. Ensure the module is available in your ChaCC plugins directory:
 
-## Development
+```
+plugins/chacc_messaging/
+```
 
-### Testing
+2. Install dependencies:
 
-Run tests using pytest:
+```bash
+pip install -r plugins/chacc_messaging/requirements.txt
+```
+
+The only runtime dependency is `jinja2>=3.1.0`.
+
+## Configuration
+
+The module reads configuration from the ChaCC module context. Set these keys for your module:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `EMAIL_BACKEND` | `console` | Adapter to use: `console` for dev, `smtp` for production |
+| `EMAIL_SMTP_HOST` | `""` | SMTP server host (required when `EMAIL_BACKEND=smtp`) |
+| `EMAIL_SMTP_PORT` | `587` | SMTP server port |
+| `EMAIL_SMTP_USERNAME` | `""` | SMTP authentication username |
+| `EMAIL_SMTP_PASSWORD` | `""` | SMTP authentication password |
+| `EMAIL_SMTP_FROM` | `noreply@example.com` | Default sender email address |
+| `ENVIRONMENT` | `development` | Environment name |
+
+### Example: SMTP configuration
+
+```python
+# In your module's config or environment
+EMAIL_BACKEND=smtp
+EMAIL_SMTP_HOST=smtp.example.com
+EMAIL_SMTP_PORT=465
+EMAIL_SMTP_USERNAME=user@example.com
+EMAIL_SMTP_PASSWORD=your_password
+EMAIL_SMTP_FROM=alerts@yourapp.com
+```
+
+When `EMAIL_BACKEND=console` or `EMAIL_SMTP_HOST` is empty, messages print to stdout instead of sending.
+
+## Quick Start
+
+### From another module (programmatic)
+
+```python
+from chacc_messaging_src.context_factory import get_messaging_service, get_db
+
+# Get the service from context
+messaging_service = get_messaging_service()
+db = await get_db()
+
+# Send via template
+notification = await messaging_service.send(
+    db=db,
+    template_key="order_shipped",
+    recipient_id=customer.id,
+    recipient_contact=customer.email,
+    variables={
+        "order_id": order_id,
+        "tracking_number": order.tracking_number,
+    },
+    module_name="order_service",
+)
+
+await db.commit()
+```
+
+### Via REST API
+
+```bash
+# Send via template
+curl -X POST http://localhost:8000/messaging/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "module_name": "order_service",
+    "template_key": "order_shipped",
+    "recipient_id": "cust_123",
+    "recipient_contact": "customer@example.com",
+    "variables": {
+      "order_id": "ORD-001",
+      "tracking_number": "TRK-456"
+    },
+    "channel": "email"
+  }'
+
+# Send directly (no template)
+curl -X POST http://localhost:8000/messaging/send-direct \
+  -H "Content-Type: application/json" \
+  -d '{
+    "module_name": "order_service",
+    "recipient_id": "cust_123",
+    "recipient_contact": "customer@example.com",
+    "subject": "Order shipped",
+    "body": "Your order ORD-001 has been shipped.",
+    "channel": "email",
+    "adapter_name": "console"
+  }'
+```
+
+## Creating Templates
+
+Templates define reusable message content with Jinja2 placeholders and variable validation.
+
+### Programmatic
+
+```python
+template = await messaging_service.create_template(
+    db=db,
+    template_key="order_shipped",
+    module_name="order_service",
+    channel="email",
+    adapter_name="console",
+    subject_template="Order {{order_id}} Shipped",
+    body_template="Hi {{customer_name}}, your order {{order_id}} is on its way. Tracking: {{tracking_number}}",
+    email_type="html",
+    variables_schema={
+        "order_id": {"type": "string", "required": True},
+        "tracking_number": {"type": "string", "required": True},
+        "customer_name": {"type": "string", "required": False},
+    },
+    description="Order shipped notification",
+)
+await db.commit()
+```
+
+### Via REST API
+
+```bash
+curl -X POST http://localhost:8000/messaging/templates \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template_key": "order_shipped",
+    "channel": "email",
+    "adapter_name": "console",
+    "subject_template": "Order {{order_id}} Shipped",
+    "body_template": "Hi {{customer_name}}, your order {{order_id}} is on its way.",
+    "email_type": "html",
+    "variables_schema": {
+      "order_id": {"type": "string", "required": true},
+      "customer_name": {"type": "string", "required": false}
+    }
+  }'
+```
+
+## Sending Messages
+
+### Template-based send (`send`)
+
+Looks up the template by `(module_name, template_key)`, validates variables against `variables_schema`, renders with Jinja2, and queues delivery.
+
+```python
+notification = await messaging_service.send(
+    db=db,
+    template_key="order_shipped",
+    recipient_id="cust_123",
+    recipient_contact="customer@example.com",
+    variables={
+        "order_id": "ORD-001",
+        "tracking_number": "TRK-456",
+    },
+    module_name="order_service",
+    channel="email",          # optional override
+    metadata={"order_id": "ORD-001"},
+    overrides={
+        "max_retry_attempts": 5,
+        "retry_backoff_seconds": 60,
+    },
+)
+```
+
+### Direct send (`send_direct`)
+
+Bypasses template lookup. Use this for one-off messages or when content is dynamic.
+
+```python
+# Email (subject required)
+notification = await messaging_service.send_direct(
+    db=db,
+    recipient_id="cust_123",
+    recipient_contact="customer@example.com",
+    subject="Urgent: Action required",
+    body="Please update your payment method.",
+    module_name="billing_service",
+    channel="email",
+    adapter_name="smtp",
+)
+
+# SMS (subject not used)
+notification = await messaging_service.send_direct(
+    db=db,
+    recipient_id="cust_123",
+    recipient_contact="+255712345678",
+    body="Your OTP is 123456",
+    module_name="auth_service",
+    channel="sms",
+    adapter_name="twilio",
+)
+```
+
+## Variable Validation
+
+When using `send()`, the service validates `variables` against the template's `variables_schema` before rendering. Missing required fields raise `VariableValidationError`.
+
+```python
+variables_schema = {
+    "order_id": {"type": "string", "required": True},
+    "tracking_number": {"type": "string", "required": True},
+}
+```
+
+`send_direct()` does **not** validate variables — it uses the provided strings as-is.
+
+## Module Mapping
+
+Define per-module defaults for adapter, channel, and retry policy via `ModuleMessagingMapping`.
+
+```python
+mapping = messaging_service.create_or_update_module_mapping(
+    db=db,
+    module_name="order_service",
+    default_channels=["email", "sms"],
+    max_retry_attempts=5,
+    retry_backoff_seconds=60,
+    description="Order notifications with aggressive retry",
+)
+await db.commit()
+```
+
+These defaults apply when a send call does not specify the corresponding parameter.
+
+## REST API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/messaging/send` | Send via template |
+| `POST` | `/messaging/send-direct` | Send raw content |
+| `POST` | `/messaging/templates` | Create template |
+| `GET` | `/messaging/templates` | List templates (filter: `module_name`) |
+| `GET` | `/messaging/notifications` | List notifications (filter: `module_name`, `channel`, `status`) |
+| `GET` | `/messaging/notifications/{uuid}` | Get notification by UUID |
+| `GET` | `/messaging/notifications/{uuid}/status` | Get notification status by UUID |
+
+## Retrieving Messages
+
+```python
+# Get by UUID
+notification = messaging_service.get_notification(db, notification_uuid)
+
+# Get status only
+status = await messaging_service.get_status(db, notification_uuid)
+```
+
+## Custom Adapters
+
+Implement `BaseMessagingAdapter` to add new channels (SMS, push, etc.).
+
+```python
+from chacc_messaging_src.adapters.base import BaseMessagingAdapter, SendResult
+
+class SMSMessagingAdapter(BaseMessagingAdapter):
+    name = "twilio"
+    channel = "sms"
+
+    async def send(
+        self,
+        messaging_id: str,
+        template,
+        recipient_id: str,
+        recipient_contact: str,
+        variables: dict,
+        metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
+    ) -> SendResult:
+        # Render body from template or use provided body
+        if template:
+            body = jinja_env.from_string(template.body_template).render(**variables)
+        else:
+            body = body or ""
+
+        # Send via Twilio
+        message = client.messages.create(
+            body=body,
+            from_="+1234567890",
+            to=recipient_contact,
+        )
+        return SendResult(status="sent", message_id=message.sid)
+
+    async def validate_contact(self, contact: str) -> bool:
+        return contact.startswith("+")
+```
+
+Register the adapter in `setup_plugin()`:
+
+```python
+from chacc_messaging_src.adapters import MessagingAdapterRegistry, SMSMessagingAdapter
+
+registry = MessagingAdapterRegistry()
+registry.register(
+    adapter=SMSMessagingAdapter(),
+    channel="sms",
+    name="twilio",
+    set_default=True,
+)
+```
+
+## Error Handling
+
+The service raises specific exceptions:
+
+- `TemplateNotFoundError` — template key not found for the module
+- `VariableValidationError` — required template variable missing
+- `AdapterNotFoundError` — no adapter registered for the channel
+
+```python
+from chacc_messaging_src.exceptions import TemplateNotFoundError, VariableValidationError
+
+try:
+    message = await messaging_service.send(...)
+except TemplateNotFoundError:
+    # Handle missing template
+except VariableValidationError as e:
+    # Handle missing variables
+```
+
+## Architecture
+
+### Component Overview
+
+```mermaid
+flowchart TD
+    subgraph chacc_messaging[chacc_messaging Module]
+        REST[REST API - FastAPI /messaging/*]
+        PROG[Programmatic API - MessagingService]
+        
+        subgraph Service[MessagingService]
+            T1[Template lookup / validation]
+            T2[Module mapping resolution]
+            T3[Redis rate-limit check]
+            T4[Jinja2 render]
+            T5[Create record -> flush DB]
+            T6[Schedule async delivery]
+        end
+        
+        DB[(DB SQL - templates, messages, mappings)]
+        REDIS[(Redis optional - rate limit counter)]
+        TASK[asyncio task - delivery queue]
+        DELIVER[_deliver_async - retry loop]
+        
+        CONSOLE[Console Adapter - dev/staging]
+        EMAIL[Email Adapter - SMTP / console]
+        CUSTOM[Custom Adapters - SMS, push]
+    end
+    
+    REST --> Service
+    PROG --> Service
+    Service --> DB
+    Service --> REDIS
+    Service --> TASK
+    TASK --> DELIVER
+    DELIVER --> CONSOLE
+    DELIVER --> EMAIL
+    DELIVER --> CUSTOM
+```
+
+### Message Flow: Template-based Send (`send()`)
+
+```mermaid
+flowchart TD
+    Start([Caller Module / HTTP]) --> A[MessagingService.send]
+    A --> B{Lookup MessagingTemplate?}
+    B -->|Missing| Error1[Raise TemplateNotFoundError]
+    B -->|Found| C[Validate variables]
+    C --> D{Missing required?}
+    D -->|Yes| Error2[Raise VariableValidationError]
+    D -->|No| E[Resolve effective_channel]
+    E --> F[Get ModuleMessagingMapping]
+    F --> G{Resolve rate_limit}
+    G --> H{Redis available and rate_limit set?}
+    H -->|No| I[Render Jinja2 subject + body]
+    H -->|Exceeded| Error3[Raise AdapterNotFoundError rate_limit_exceeded]
+    H -->|Allowed| I
+    I --> J[Create Messaging record status=PENDING]
+    J --> K[db.flush]
+    K --> L[Schedule _deliver_async as background task]
+    L --> M[Return Messaging]
+    M --> N[Caller db.commit]
+    Error1 --> End
+    Error2 --> End
+    Error3 --> End
+    N --> End
+```
+
+### Message Flow: Direct Send (`send_direct()`)
+
+```mermaid
+flowchart TD
+    Start([Caller Module / HTTP]) --> A[MessagingService.send_direct]
+    A --> B[Resolve channel param > default email]
+    A --> C[Resolve adapter_name param > default console]
+    B --> D[Get ModuleMessagingMapping]
+    C --> D
+    D --> E{Resolve rate_limit}
+    E --> F{Redis available and rate_limit set?}
+    F -->|No| G[Create Messaging record status=PENDING no template_id]
+    F -->|Exceeded| Error1[Raise AdapterNotFoundError rate_limit_exceeded]
+    F -->|Allowed| G
+    G --> H[db.flush]
+    H --> I[Schedule _deliver_async as background task]
+    I --> J[Return Messaging]
+    J --> K[Caller db.commit]
+    Error1 --> End
+    K --> End
+```
+
+### Async Delivery Flow (`_deliver_async()`)
+
+```mermaid
+flowchart TD
+    Start([Background Task _deliver_async]) --> A[Acquire DB session]
+    A --> B{DB available?}
+    B -->|No| End1([Return])
+    B -->|Yes| C[Reload Messaging by ID]
+    C --> D{Found?}
+    D -->|No| End2([Return])
+    D -->|Yes| E[Get ModuleMessagingMapping]
+    E --> F[Resolve max_retries overrides > mapping > 3]
+    E --> G[Resolve backoff overrides > mapping > 300s]
+    F --> H[Resolve effective adapter]
+    G --> H
+    H --> I{Adapter registered?}
+    I -->|No| Error1[Raise AdapterNotFoundError]
+    I -->|Yes| J[Retry loop attempt 1..max_retries]
+    J --> K[adapter.send]
+    K --> L{result.status == sent?}
+    L -->|Yes| M[status=SENT sent_at=now commit]
+    M --> End3([Return])
+    L -->|No| N[status=RETRYING last_error=msg commit]
+    N --> O{attempt < max_retries?}
+    O -->|Yes| P[sleep backoff backoff *= 2]
+    P --> J
+    O -->|No| Q[status=FAILED last_error=last_error commit]
+    Q --> End4([Return])
+    Error1 --> End5([Return])
+```
+
+### Override Resolution
+
+```mermaid
+flowchart LR
+    A[_apply_overrides] --> B{key in overrides?}
+    B -->|Yes| C[Return overrides.key per-call]
+    B -->|No| D{mapping exists and key not None?}
+    D -->|Yes| E[Return mapping.key per-module]
+    D -->|No| F[Return default hard-coded]
+```
+
+### Data Model Relationships
+
+```mermaid
+flowchart TD
+    T[MessagingTemplate]
+    M[Messaging]
+    MM[ModuleMessagingMapping]
+    S[MessagingStatus]
+    T -->|template_id| M
+    M -->|status| S
+    MM -->|module_name| M
+```
+
+### Adapter Interface
+
+```python
+class BaseMessagingAdapter:
+    name: str              # e.g. "console", "smtp", "twilio"
+    channel: str           # e.g. "email", "sms"
+
+    async def send(...) -> SendResult
+    async def validate_contact(contact: str) -> bool
+```
+
+## Running Tests
 
 ```bash
 pytest plugins/chacc_messaging/chacc_messaging_src/tests/ -v
 ```
 
-## Configuration
+Or using the standalone runner:
 
-- `CHACC_NOTIFICATIONS_EMAIL_BACKEND`: Set to `console` (development) or `smtp` (production)
-- `CHACC_NOTIFICATIONS_EMAIL_SMTP_HOST`: SMTP server host
-- `CHACC_NOTIFICATIONS_EMAIL_SMTP_PORT`: SMTP server port
-- `CHACC_NOTIFICATIONS_EMAIL_SMTP_USERNAME`: SMTP username
-- `CHACC_NOTIFICATIONS_EMAIL_SMTP_PASSWORD`: SMTP password
-- `CHACC_NOTIFICATIONS_EMAIL_SMTP_FROM`: From email address
+```bash
+python plugins/chacc_messaging/chacc_messaging_src/run_tests.py
+```
 
-## API Endpoints
+## Project Structure
 
-- `POST /notifications/send` - Send a notification
-- `POST /notifications/templates` - Register a notification template
-- `GET /notifications/templates` - List notification templates
-- `GET /notifications/health` - Health check
+```
+plugins/chacc_messaging/
+├── chacc_messaging_src/
+│   ├── main.py              # Plugin entry point
+│   ├── config.py            # Configuration loader
+│   ├── context_factory.py   # Context and service access helpers
+│   ├── models.py            # SQLAlchemy models
+│   ├── exceptions.py        # Custom exceptions
+│   ├── service.py           # Core messaging service
+│   ├── routes.py            # REST API routes
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   ├── base.py          # Abstract adapter base
+│   │   ├── email.py         # SMTP email adapter
+│   │   └── console.py       # Console adapter for dev
+│   ├── tests/
+│   │   ├── __init__.py
+│   │   └── test_module.py
+│   └── run_tests.py
+├── module_meta.json
+├── requirements.txt
+└── README.md
+```
 
-## Dependencies
+## License
 
-- Python 3.12+
-- FastAPI
-- SQLAlchemy
-- Pydantic
-- Jinja2
-
-See `requirements.txt` for full dependencies.
+MIT

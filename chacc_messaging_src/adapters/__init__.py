@@ -1,11 +1,11 @@
-from .base import BaseNotificationAdapter, SendResult, NotificationAdapterRegistry
-from .email import EmailNotificationAdapter
-from .console import ConsoleNotificationAdapter
+from .base import BaseMessagingAdapter, SendResult, MessagingAdapterRegistry
+from .email import EmailMessagingAdapter
+from .console import ConsoleMessagingAdapter
 
 __all__ = [
-    "BaseNotificationAdapter",
+    "BaseMessagingAdapter",
     "SendResult",
-    "NotificationAdapterRegistry",
-    "EmailNotificationAdapter",
-    "ConsoleNotificationAdapter",
+    "MessagingAdapterRegistry",
+    "EmailMessagingAdapter",
+    "ConsoleMessagingAdapter",
 ]

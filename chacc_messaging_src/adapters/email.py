@@ -6,10 +6,10 @@ from email.mime.multipart import MIMEMultipart
 from typing import Optional
 from jinja2 import Environment, StrictUndefined
 
-from .base import BaseNotificationAdapter, SendResult
+from .base import BaseMessagingAdapter, SendResult
 
 
-class EmailNotificationAdapter(BaseNotificationAdapter):
+class EmailMessagingAdapter(BaseMessagingAdapter):
     name = "smtp"
     channel = "email"
 
@@ -19,7 +19,7 @@ class EmailNotificationAdapter(BaseNotificationAdapter):
 
     async def send(
         self,
-        notification_id: str,
+        messaging_id: str,
         template,
         recipient_id: str,
         recipient_contact: str,

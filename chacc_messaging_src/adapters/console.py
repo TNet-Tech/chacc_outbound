@@ -2,10 +2,10 @@ import uuid
 from typing import Optional
 from jinja2 import Environment, StrictUndefined
 
-from .base import BaseNotificationAdapter, SendResult
+from .base import BaseMessagingAdapter, SendResult
 
 
-class ConsoleNotificationAdapter(BaseNotificationAdapter):
+class ConsoleMessagingAdapter(BaseMessagingAdapter):
     name = "console"
     channel = "email"
 
@@ -14,7 +14,7 @@ class ConsoleNotificationAdapter(BaseNotificationAdapter):
 
     async def send(
         self,
-        notification_id: str,
+        messaging_id: str,
         template,
         recipient_id: str,
         recipient_contact: str,
@@ -35,7 +35,7 @@ class ConsoleNotificationAdapter(BaseNotificationAdapter):
         print(f"\n{'='*80}")
         print(f"NOTIFICATION (Console Backend)")
         print(f"{'='*80}")
-        print(f"Notification ID: {notification_id}")
+        print(f"Messaging ID: {messaging_id}")
         if template:
             print(f"Template: {template.template_key}")
         else:
@@ -48,7 +48,7 @@ class ConsoleNotificationAdapter(BaseNotificationAdapter):
 
         return SendResult(
             status="sent",
-            message_id=f"console_{notification_id}",
+            message_id=f"console_{messaging_id}",
         )
 
     async def validate_contact(self, contact: str) -> bool:

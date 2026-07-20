@@ -1,84 +1,63 @@
-"""
-Context factory for providing BackboneContext in different environments.
-"""
-import os
+from functools import lru_cache
 from typing import Optional
-from fastapi import HTTPException
-from chacc_api import BackboneContext
+
+from .service import MessagingService
 
 
-_module_context: Optional[BackboneContext] = None
+_module_context = None
 
 
-def set_module_context(context: BackboneContext):
-    """Set the module context (called by main.py)."""
+def get_context(context=None):
+    global _module_context
+    if context:
+        _module_context = context
+    return _module_context
+
+
+def set_module_context(context):
     global _module_context
     _module_context = context
 
 
-def get_module_context() -> Optional[BackboneContext]:
-    """Get the module context (used by other modules to avoid circular imports)."""
+def get_module_context():
     return _module_context
 
 
-class ContextFactory:
-    @staticmethod
-    def get_context(context: Optional[BackboneContext] = None) -> BackboneContext:
-        if context is not None:
-            return context
+@lru_cache()
+def get_messaging_config(module_context) -> dict:
+    if module_context is None:
+        return {
+            "ENVIRONMENT": "development",
+            "EMAIL_BACKEND": "console",
+            "EMAIL_SMTP_HOST": "",
+            "EMAIL_SMTP_PORT": 587,
+            "EMAIL_SMTP_USERNAME": "",
+            "EMAIL_SMTP_PASSWORD": "",
+            "EMAIL_SMTP_FROM": "noreply@example.com",
+        }
 
-        raise RuntimeError(
-            "No context provided. This module requires the ChaCC backbone to run. "
-            "dev_context has been removed - modules must run within the backbone."
-        )
-
-    @staticmethod
-    def is_backbone_available() -> bool:
-        return os.getenv("CHACC_BACKBONE") == "true"
-
-    @staticmethod
-    def require_backbone():
-        if not ContextFactory.is_backbone_available():
-            raise RuntimeError(
-                "This module requires the ChaCC backbone to be available. "
-                "Use development context for testing: CHACC_ENV=development"
-            )
-
-
-def get_context(context: Optional[BackboneContext] = None) -> BackboneContext:
-    return ContextFactory.get_context(context)
+    return {
+        "ENVIRONMENT": module_context.get_module_config("ENVIRONMENT", "chacc_messaging", default="development"),
+        "EMAIL_BACKEND": module_context.get_module_config("EMAIL_BACKEND", "chacc_messaging", default="console"),
+        "EMAIL_SMTP_HOST": module_context.get_module_config("EMAIL_SMTP_HOST", "chacc_messaging", default=""),
+        "EMAIL_SMTP_PORT": int(module_context.get_module_config("EMAIL_SMTP_PORT", "chacc_messaging", default="587")),
+        "EMAIL_SMTP_USERNAME": module_context.get_module_config("EMAIL_SMTP_USERNAME", "chacc_messaging", default=""),
+        "EMAIL_SMTP_PASSWORD": module_context.get_module_config("EMAIL_SMTP_PASSWORD", "chacc_messaging", default=""),
+        "EMAIL_SMTP_FROM": module_context.get_module_config("EMAIL_SMTP_FROM", "chacc_messaging", default="noreply@example.com"),
+    }
 
 
 async def get_db():
-    """Get database session from module context."""
-    context: BackboneContext = get_module_context()
-    if context is None:
-        raise HTTPException(status_code=500, detail="Module not initialized")
-    return await anext(context.get_db())
-
-
-def get_notification_service():
-    """Get notification service from module context."""
     context = get_module_context()
-    if context is None:
-        raise HTTPException(status_code=500, detail="Module not initialized")
-    service = context.get_service("notification_service")
-    if service is None:
-        raise HTTPException(status_code=500, detail="Notification service not initialized")
-    return service
+    if context and hasattr(context, "get_db"):
+        async for db in context.get_db():
+            yield db
+    else:
+        raise RuntimeError("Database not available")
 
 
-async def get_redis_client():
-    """Get Redis client from module context."""
+def get_messaging_service():
     context = get_module_context()
-    if context is None:
-        return None
-
-    redis_service = context.get_service("redis")
-    if redis_service is None:
-        return None
-
-    try:
-        return await redis_service.get_client()
-    except Exception:
-        return None
+    if context:
+        return context.get_service("messaging_service")
+    raise RuntimeError("Messaging service not initialized")

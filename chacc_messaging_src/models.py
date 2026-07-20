@@ -4,14 +4,14 @@ from chacc_api import ChaCCBaseModel, register_model
 from sqlalchemy import Column, String, Integer, Boolean, Text, JSON, Enum as SQLAEnum, DateTime
 
 
-class NotificationStatus(str, Enum):
+class MessagingStatus(str, Enum):
     PENDING = "PENDING"
     SENT = "SENT"
     FAILED = "FAILED"
     RETRYING = "RETRYING"
 
 
-class NotificationTemplate(ChaCCBaseModel):
+class MessagingTemplate(ChaCCBaseModel):
     __tablename__ = "notification_templates"
 
     template_key = Column(String(100), nullable=False)
@@ -31,7 +31,7 @@ class NotificationTemplate(ChaCCBaseModel):
     is_active = Column(Boolean, default=True, nullable=False)
 
 
-class Notification(ChaCCBaseModel):
+class Messaging(ChaCCBaseModel):
     __tablename__ = "notifications"
 
     template_id = Column(Integer, nullable=True)
@@ -45,21 +45,25 @@ class Notification(ChaCCBaseModel):
 
     notification_metadata = Column(JSON, nullable=True)
 
-    status = Column(SQLAEnum(NotificationStatus), default=NotificationStatus.PENDING, nullable=False)
+    status = Column(SQLAEnum(MessagingStatus), default=MessagingStatus.PENDING, nullable=False)
     sent_at = Column(DateTime, nullable=True)
 
     attempts = Column(Integer, default=0)
     last_error = Column(String(500), nullable=True)
 
 
-
-class ModuleNotificationMapping(ChaCCBaseModel):
-    __tablename__ = "module_notification_mappings"
+class ModuleMessagingMapping(ChaCCBaseModel):
+    __tablename__ = "module_messaging_mappings"
 
     module_name = Column(String(100), primary_key=True)
 
+    default_adapter_name = Column(String(50), nullable=False, default="console")
+    default_channel = Column(String(20), nullable=False, default="email")
+    default_template_key = Column(String(100), nullable=True)
     default_channels = Column(JSON, default=["email"])
     max_retry_attempts = Column(Integer, default=3)
     retry_backoff_seconds = Column(Integer, default=300)
+    rate_limit_per_minute = Column(Integer, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     description = Column(String(500), nullable=True)

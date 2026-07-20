@@ -1,36 +1,24 @@
-#!/usr/bin/env python3
-"""
-Standalone test runner for chacc_messaging module.
-This script runs the module's tests without depending on the backbone.
-"""
 import sys
 import os
 import subprocess
 
-# Get the project root (parent of the module directory)
-module_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(module_dir)
-
 
 def run_tests():
-    """Run pytest for this module."""
-    # Ensure we're using the shared virtual environment
-    venv_python = os.path.join(project_root, ".chacc_venv", "bin", "python")
-    if not os.path.exists(venv_python):
-        venv_python = sys.executable  # Fall back to current Python
-
-    # Add project root to path
-    sys.path.insert(0, project_root)
-
-    # Run pytest
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(os.path.dirname(tests_dir), "..", ".venv", "bin", "python")
+    python = str(venv_python if os.path.exists(venv_python) else sys.executable)
     result = subprocess.run(
-        [venv_python, "-m", "pytest", "tests/", "-v", "--tb=short"],
-        cwd=module_dir,
-        env={**os.environ, "PYTHONPATH": project_root}
+        [python, "-m", "pytest", "tests", "-v", "--tb=short"],
+        cwd=tests_dir,
+        env={**os.environ, "PYTHONPATH": tests_dir},
     )
-
-    return result.returncode
+    if result.returncode == 0:
+        print("All tests passed")
+        sys.exit(0)
+    else:
+        print("Tests failed")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(run_tests())
+    run_tests()

@@ -20,9 +20,9 @@ class SendResult:
         self.metadata = metadata or {}
 
 
-class BaseNotificationAdapter(ABC):
+class BaseMessagingAdapter(ABC):
     """
-    Abstract base for notification adapters.
+    Abstract base for messaging adapters.
 
     Each adapter handles one channel (email, sms, push).
     All use Jinja2 for template variable substitution.
@@ -34,7 +34,7 @@ class BaseNotificationAdapter(ABC):
     @abstractmethod
     async def send(
         self,
-        notification_id: str,
+        messaging_id: str,
         template,
         recipient_id: str,
         recipient_contact: str,
@@ -56,7 +56,7 @@ class BaseNotificationAdapter(ABC):
         return True
 
 
-class NotificationAdapterRegistry:
+class MessagingAdapterRegistry:
     """Manages registered adapters by channel."""
 
     def __init__(self):
@@ -65,7 +65,7 @@ class NotificationAdapterRegistry:
 
     def register(
         self,
-        adapter: BaseNotificationAdapter,
+        adapter: BaseMessagingAdapter,
         channel: str,
         name: Optional[str] = None,
         set_default: bool = False,
@@ -82,7 +82,7 @@ class NotificationAdapterRegistry:
         self,
         channel: str,
         adapter_name: Optional[str] = None,
-    ) -> BaseNotificationAdapter:
+    ) -> BaseMessagingAdapter:
         """Get adapter by channel and optional name."""
         name = adapter_name or self._defaults.get(channel)
         if not name:
@@ -104,7 +104,7 @@ class NotificationAdapterRegistry:
             result[channel].append({"name": name, "class": adapter.__class__.__name__})
         return result
 
-    def get_default(self, channel: str) -> Optional[BaseNotificationAdapter]:
+    def get_default(self, channel: str) -> Optional[BaseMessagingAdapter]:
         """Get the default adapter for a channel."""
         name = self._defaults.get(channel)
         if not name:
