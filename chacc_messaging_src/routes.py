@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 
-from .context_factory import get_db, get_module_context, get_notification_service
-from .models import MessagingTemplate, Messaging, ModuleMessagingMapping, MessagingStatus
+from .context_factory import get_db, get_module_context, get_messaging_service
+from .models import Messaging, ModuleMessagingMapping, MessagingStatus
 from .service import MessagingService
 from .adapters import MessagingAdapterRegistry
-from .exceptions import TemplateNotFoundError, AdapterNotFoundError, VariableValidationError
+from .exceptions import AdapterNotFoundError
 
 
 router = APIRouter()
@@ -15,34 +15,21 @@ router = APIRouter()
 
 class SendNotificationRequest(BaseModel):
     module_name: str = Field(..., description="Module name sending the notification")
-    template_key: str = Field(..., description="Template identifier")
-    recipient_id: str = Field(..., description="User/entity identifier")
-    recipient_contact: str = Field(..., description="Email address or phone number")
-    variables: Dict[str, Any] = Field(default_factory=dict, description="Variables for template rendering")
-    channel: Optional[str] = Field(default=None, description="Channel override")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
-
-
-class SendDirectNotificationRequest(BaseModel):
-    module_name: str = Field(..., description="Module name sending the notification")
     recipient_id: str = Field(..., description="User/entity identifier")
     recipient_contact: str = Field(..., description="Email address or phone number")
     subject: Optional[str] = Field(default=None, description="Message subject (required for email, ignored for SMS)")
     body: str = Field(..., description="Message body content")
     channel: str = Field(default="email", description="Channel to use")
     adapter_name: str = Field(default="console", description="Adapter to use")
+    content_type: str = Field(default="text/plain", description="Content type: text/plain for SMS/text, html for HTML email")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
 
-
-class CreateTemplateRequest(BaseModel):
-    template_key: str = Field(..., description="Template identifier")
-    channel: str = Field(default="email", description="Channel")
-    adapter_name: str = Field(default="console", description="Adapter name")
-    subject_template: Optional[str] = Field(default=None, description="Jinja subject template")
-    body_template: str = Field(..., description="Jinja body template")
-    email_type: Optional[str] = Field(default=None, description="html or text")
-    variables_schema: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Variable schema")
-    description: Optional[str] = Field(default=None, description="Template description")
+    @field_validator("content_type")
+    @classmethod
+    def validate_content_type(cls, v: str) -> str:
+        if v not in ("text/plain", "html"):
+            raise ValueError('content_type must be "text/plain" or "html"')
+        return v
 
 
 class MessagingResponse(BaseModel):
@@ -50,7 +37,6 @@ class MessagingResponse(BaseModel):
 
     id: int
     uuid: str
-    template_id: Optional[int]
     module_name: str
     recipient_id: str
     channel: str
@@ -64,22 +50,6 @@ class MessagingResponse(BaseModel):
     last_error: Optional[str]
 
 
-class MessagingTemplateResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    template_key: str
-    module_name: str
-    channel: str
-    adapter_name: str
-    subject_template: Optional[str]
-    body_template: str
-    email_type: Optional[str]
-    variables_schema: dict
-    description: Optional[str]
-    is_active: bool
-
-
 @router.post("/send", response_model=MessagingResponse)
 async def send_notification(
     payload: SendNotificationRequest,
@@ -89,62 +59,20 @@ async def send_notification(
     try:
         notification = await service.send(
             db=db,
-            template_key=payload.template_key,
             recipient_id=payload.recipient_id,
             recipient_contact=payload.recipient_contact,
-            variables=payload.variables,
-            module_name=payload.module_name,
-            channel=payload.channel,
-            metadata=payload.metadata,
-        )
-        db.commit()
-        return MessagingResponse(
-            id=notification.id,
-            template_id=notification.template_id,
-            module_name=notification.module_name,
-            recipient_id=notification.recipient_id,
-            channel=notification.channel,
-            subject=notification.subject,
-            body=notification.body,
-            recipient_contact=notification.recipient_contact,
-            notification_metadata=notification.notification_metadata,
-            status=notification.status.value,
-            sent_at=notification.sent_at.isoformat() if notification.sent_at else None,
-            attempts=notification.attempts,
-            last_error=notification.last_error,
-        )
-    except TemplateNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except VariableValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except AdapterNotFoundError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/send-direct", response_model=MessagingResponse)
-async def send_direct_notification(
-    payload: SendDirectNotificationRequest,
-    service: MessagingService = Depends(get_messaging_service),
-    db: Session = Depends(get_db),
-):
-    try:
-        notification = await service.send_direct(
-            db=db,
-            recipient_id=payload.recipient_id,
-            recipient_contact=payload.recipient_contact,
-            subject=payload.subject,
             body=payload.body,
             module_name=payload.module_name,
+            subject=payload.subject,
             channel=payload.channel,
             adapter_name=payload.adapter_name,
             metadata=payload.metadata,
+            content_type=payload.content_type,
         )
         db.commit()
         return MessagingResponse(
             id=notification.id,
-            template_id=notification.template_id,
+            uuid=notification.uuid,
             module_name=notification.module_name,
             recipient_id=notification.recipient_id,
             channel=notification.channel,
@@ -161,72 +89,6 @@ async def send_direct_notification(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/templates", response_model=MessagingTemplateResponse, status_code=201)
-async def create_template(
-    payload: CreateTemplateRequest,
-    service: MessagingService = Depends(get_messaging_service),
-    db: Session = Depends(get_db),
-):
-    try:
-        module_context = get_module_context()
-        module_name = module_context.module_name if module_context else "chacc_messaging"
-        template = await service.create_template(
-            db=db,
-            template_key=payload.template_key,
-            module_name=module_name,
-            channel=payload.channel,
-            adapter_name=payload.adapter_name,
-            subject_template=payload.subject_template,
-            body_template=payload.body_template,
-            email_type=payload.email_type,
-            variables_schema=payload.variables_schema,
-            description=payload.description,
-        )
-        db.commit()
-        return MessagingTemplateResponse(
-            id=template.id,
-            template_key=template.template_key,
-            module_name=template.module_name,
-            channel=template.channel,
-            adapter_name=template.adapter_name,
-            subject_template=template.subject_template,
-            body_template=template.body_template,
-            email_type=template.email_type,
-            variables_schema=template.variables_schema,
-            description=template.description,
-            is_active=template.is_active,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/templates", response_model=List[MessagingTemplateResponse])
-async def list_templates(
-    module_name: Optional[str] = Query(None, description="Filter by module name"),
-    service: MessagingService = Depends(get_messaging_service),
-    db: Session = Depends(get_db),
-):
-    templates = service.list_templates(db, module_name)
-    return [
-        MessagingTemplateResponse(
-            id=t.id,
-            template_key=t.template_key,
-            module_name=t.module_name,
-            channel=t.channel,
-            adapter_name=t.adapter_name,
-            subject_template=t.subject_template,
-            body_template=t.body_template,
-            email_type=t.email_type,
-            variables_schema=t.variables_schema,
-            description=t.description,
-            is_active=t.is_active,
-        )
-        for t in templates
-    ]
 
 
 @router.get("/notifications", response_model=List[MessagingResponse])
@@ -252,7 +114,6 @@ async def list_notifications(
         MessagingResponse(
             id=n.id,
             uuid=n.uuid,
-            template_id=n.template_id,
             module_name=n.module_name,
             recipient_id=n.recipient_id,
             channel=n.channel,
@@ -281,7 +142,6 @@ async def get_notification(
     return MessagingResponse(
         id=notification.id,
         uuid=notification.uuid,
-        template_id=notification.template_id,
         module_name=notification.module_name,
         recipient_id=notification.recipient_id,
         channel=notification.channel,

@@ -1,17 +1,16 @@
 # chacc_messaging
 
-A ChaCC module providing **email and SMS messaging** via templates and adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
+A ChaCC module providing **email and SMS messaging** via adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
 
 ## Features
 
-- **Template-based sending**: Render messages with Jinja2 templates and validated variable schemas
-- **Direct sends**: Bypass templates and send raw content instantly
+- **Direct sends**: Send raw content instantly with full control over subject, body, channel, and adapter
 - **Email (HTML/Text)**: SMTP adapter + console adapter for development
 - **SMS**: Extensible adapter pattern for SMS providers (Twilio, etc.)
 - **Retry & backoff**: Automatic retries with configurable backoff per module
 - **Async delivery**: Fire-and-forget with status tracking
 - **Programmatic API**: Other modules use `MessagingService` directly — no HTTP required
-- **REST API**: Admin endpoints for templates, notifications, and sending
+- **REST API**: Admin endpoints for notifications and sending
 
 ## Installation
 
@@ -26,8 +25,6 @@ plugins/chacc_messaging/
 ```bash
 pip install -r plugins/chacc_messaging/requirements.txt
 ```
-
-The only runtime dependency is `jinja2>=3.1.0`.
 
 ## Configuration
 
@@ -68,17 +65,27 @@ from chacc_messaging_src.context_factory import get_messaging_service, get_db
 messaging_service = get_messaging_service()
 db = await get_db()
 
-# Send via template
+# Send a message
 notification = await messaging_service.send(
     db=db,
-    template_key="order_shipped",
     recipient_id=customer.id,
     recipient_contact=customer.email,
-    variables={
-        "order_id": order_id,
-        "tracking_number": order.tracking_number,
-    },
+    subject="Your order has shipped",
+    body="Your order ORD-001 has been shipped. Tracking: TRK-456",
     module_name="order_service",
+    channel="email",
+)
+
+# Send HTML email
+notification = await messaging_service.send(
+    db=db,
+    recipient_id=customer.id,
+    recipient_contact=customer.email,
+    subject="Your order has shipped",
+    body="<h1>Your order ORD-001 has shipped</h1>",
+    module_name="order_service",
+    channel="email",
+    content_type="html",
 )
 
 await db.commit()
@@ -87,23 +94,7 @@ await db.commit()
 ### Via REST API
 
 ```bash
-# Send via template
 curl -X POST http://localhost:8000/messaging/send \
-  -H "Content-Type: application/json" \
-  -d '{
-    "module_name": "order_service",
-    "template_key": "order_shipped",
-    "recipient_id": "cust_123",
-    "recipient_contact": "customer@example.com",
-    "variables": {
-      "order_id": "ORD-001",
-      "tracking_number": "TRK-456"
-    },
-    "channel": "email"
-  }'
-
-# Send directly (no template)
-curl -X POST http://localhost:8000/messaging/send-direct \
   -H "Content-Type: application/json" \
   -d '{
     "module_name": "order_service",
@@ -112,88 +103,20 @@ curl -X POST http://localhost:8000/messaging/send-direct \
     "subject": "Order shipped",
     "body": "Your order ORD-001 has been shipped.",
     "channel": "email",
-    "adapter_name": "console"
-  }'
-```
-
-## Creating Templates
-
-Templates define reusable message content with Jinja2 placeholders and variable validation.
-
-### Programmatic
-
-```python
-template = await messaging_service.create_template(
-    db=db,
-    template_key="order_shipped",
-    module_name="order_service",
-    channel="email",
-    adapter_name="console",
-    subject_template="Order {{order_id}} Shipped",
-    body_template="Hi {{customer_name}}, your order {{order_id}} is on its way. Tracking: {{tracking_number}}",
-    email_type="html",
-    variables_schema={
-        "order_id": {"type": "string", "required": True},
-        "tracking_number": {"type": "string", "required": True},
-        "customer_name": {"type": "string", "required": False},
-    },
-    description="Order shipped notification",
-)
-await db.commit()
-```
-
-### Via REST API
-
-```bash
-curl -X POST http://localhost:8000/messaging/templates \
-  -H "Content-Type: application/json" \
-  -d '{
-    "template_key": "order_shipped",
-    "channel": "email",
     "adapter_name": "console",
-    "subject_template": "Order {{order_id}} Shipped",
-    "body_template": "Hi {{customer_name}}, your order {{order_id}} is on its way.",
-    "email_type": "html",
-    "variables_schema": {
-      "order_id": {"type": "string", "required": true},
-      "customer_name": {"type": "string", "required": false}
-    }
+    "content_type": "text/plain"
   }'
 ```
 
 ## Sending Messages
 
-### Template-based send (`send`)
+### Direct send (`send`)
 
-Looks up the template by `(module_name, template_key)`, validates variables against `variables_schema`, renders with Jinja2, and queues delivery.
+Bypasses template lookup. Use this for all messaging — content is passed directly.
 
 ```python
+# Email - text (default)
 notification = await messaging_service.send(
-    db=db,
-    template_key="order_shipped",
-    recipient_id="cust_123",
-    recipient_contact="customer@example.com",
-    variables={
-        "order_id": "ORD-001",
-        "tracking_number": "TRK-456",
-    },
-    module_name="order_service",
-    channel="email",          # optional override
-    metadata={"order_id": "ORD-001"},
-    overrides={
-        "max_retry_attempts": 5,
-        "retry_backoff_seconds": 60,
-    },
-)
-```
-
-### Direct send (`send_direct`)
-
-Bypasses template lookup. Use this for one-off messages or when content is dynamic.
-
-```python
-# Email (subject required)
-notification = await messaging_service.send_direct(
     db=db,
     recipient_id="cust_123",
     recipient_contact="customer@example.com",
@@ -204,8 +127,21 @@ notification = await messaging_service.send_direct(
     adapter_name="smtp",
 )
 
-# SMS (subject not used)
-notification = await messaging_service.send_direct(
+# Email - HTML
+notification = await messaging_service.send(
+    db=db,
+    recipient_id="cust_123",
+    recipient_contact="customer@example.com",
+    subject="Order confirmation",
+    body="<h1>Order ORD-001 confirmed</h1><p>Thank you for your purchase.</p>",
+    module_name="order_service",
+    channel="email",
+    adapter_name="smtp",
+    content_type="html",
+)
+
+# SMS (subject not used, content_type defaults to text/plain)
+notification = await messaging_service.send(
     db=db,
     recipient_id="cust_123",
     recipient_contact="+255712345678",
@@ -216,32 +152,23 @@ notification = await messaging_service.send_direct(
 )
 ```
 
-## Variable Validation
-
-When using `send()`, the service validates `variables` against the template's `variables_schema` before rendering. Missing required fields raise `VariableValidationError`.
-
-```python
-variables_schema = {
-    "order_id": {"type": "string", "required": True},
-    "tracking_number": {"type": "string", "required": True},
-}
-```
-
-`send_direct()` does **not** validate variables — it uses the provided strings as-is.
+| Parameter | Email | SMS |
+|-----------|-------|-----|
+| `subject` | Required | Ignored |
+| `content_type` | `text/plain` (default) or `html` | Not required (defaults to `text/plain`) |
 
 ## Module Mapping
 
 Define per-module defaults for adapter, channel, and retry policy via `ModuleMessagingMapping`.
 
 ```python
-mapping = messaging_service.create_or_update_module_mapping(
-    db=db,
-    module_name="order_service",
-    default_channels=["email", "sms"],
-    max_retry_attempts=5,
-    retry_backoff_seconds=60,
-    description="Order notifications with aggressive retry",
-)
+    mapping = messaging_service.create_or_update_module_mapping(
+        db=db,
+        module_name="order_service",
+        max_retry_attempts=5,
+        retry_backoff_seconds=60,
+        description="Order notifications with aggressive retry",
+    )
 await db.commit()
 ```
 
@@ -251,10 +178,7 @@ These defaults apply when a send call does not specify the corresponding paramet
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/messaging/send` | Send via template |
-| `POST` | `/messaging/send-direct` | Send raw content |
-| `POST` | `/messaging/templates` | Create template |
-| `GET` | `/messaging/templates` | List templates (filter: `module_name`) |
+| `POST` | `/messaging/send` | Send message |
 | `GET` | `/messaging/notifications` | List notifications (filter: `module_name`, `channel`, `status`) |
 | `GET` | `/messaging/notifications/{uuid}` | Get notification by UUID |
 | `GET` | `/messaging/notifications/{uuid}/status` | Get notification status by UUID |
@@ -283,23 +207,16 @@ class SMSMessagingAdapter(BaseMessagingAdapter):
     async def send(
         self,
         messaging_id: str,
-        template,
         recipient_id: str,
         recipient_contact: str,
-        variables: dict,
         metadata: Optional[dict] = None,
         subject: Optional[str] = None,
         body: Optional[str] = None,
+        content_type: str = "text/plain",
     ) -> SendResult:
-        # Render body from template or use provided body
-        if template:
-            body = jinja_env.from_string(template.body_template).render(**variables)
-        else:
-            body = body or ""
-
         # Send via Twilio
         message = client.messages.create(
-            body=body,
+            body=body or "",
             from_="+1234567890",
             to=recipient_contact,
         )
@@ -327,19 +244,15 @@ registry.register(
 
 The service raises specific exceptions:
 
-- `TemplateNotFoundError` — template key not found for the module
-- `VariableValidationError` — required template variable missing
 - `AdapterNotFoundError` — no adapter registered for the channel
 
 ```python
-from chacc_messaging_src.exceptions import TemplateNotFoundError, VariableValidationError
+from chacc_messaging_src.exceptions import AdapterNotFoundError
 
 try:
     message = await messaging_service.send(...)
-except TemplateNotFoundError:
-    # Handle missing template
-except VariableValidationError as e:
-    # Handle missing variables
+except AdapterNotFoundError as e:
+    # Handle missing adapter
 ```
 
 ## Architecture
@@ -353,15 +266,13 @@ flowchart TD
         PROG[Programmatic API - MessagingService]
         
         subgraph Service[MessagingService]
-            T1[Template lookup / validation]
-            T2[Module mapping resolution]
-            T3[Redis rate-limit check]
-            T4[Jinja2 render]
-            T5[Create record -> flush DB]
-            T6[Schedule async delivery]
+            T1[Module mapping resolution]
+            T2[Redis rate-limit check]
+            T3[Create record -> flush DB]
+            T4[Schedule async delivery]
         end
         
-        DB[(DB SQL - templates, messages, mappings)]
+        DB[(DB SQL - messages, mappings)]
         REDIS[(Redis optional - rate limit counter)]
         TASK[asyncio task - delivery queue]
         DELIVER[_deliver_async - retry loop]
@@ -382,46 +293,18 @@ flowchart TD
     DELIVER --> CUSTOM
 ```
 
-### Message Flow: Template-based Send (`send()`)
+### Message Flow: Direct Send (`send()`)
 
 ```mermaid
 flowchart TD
     Start([Caller Module / HTTP]) --> A[MessagingService.send]
-    A --> B{Lookup MessagingTemplate?}
-    B -->|Missing| Error1[Raise TemplateNotFoundError]
-    B -->|Found| C[Validate variables]
-    C --> D{Missing required?}
-    D -->|Yes| Error2[Raise VariableValidationError]
-    D -->|No| E[Resolve effective_channel]
-    E --> F[Get ModuleMessagingMapping]
-    F --> G{Resolve rate_limit}
-    G --> H{Redis available and rate_limit set?}
-    H -->|No| I[Render Jinja2 subject + body]
-    H -->|Exceeded| Error3[Raise AdapterNotFoundError rate_limit_exceeded]
-    H -->|Allowed| I
-    I --> J[Create Messaging record status=PENDING]
-    J --> K[db.flush]
-    K --> L[Schedule _deliver_async as background task]
-    L --> M[Return Messaging]
-    M --> N[Caller db.commit]
-    Error1 --> End
-    Error2 --> End
-    Error3 --> End
-    N --> End
-```
-
-### Message Flow: Direct Send (`send_direct()`)
-
-```mermaid
-flowchart TD
-    Start([Caller Module / HTTP]) --> A[MessagingService.send_direct]
     A --> B[Resolve channel param > default email]
     A --> C[Resolve adapter_name param > default console]
     B --> D[Get ModuleMessagingMapping]
     C --> D
     D --> E{Resolve rate_limit}
     E --> F{Redis available and rate_limit set?}
-    F -->|No| G[Create Messaging record status=PENDING no template_id]
+    F -->|No| G[Create Messaging record status=PENDING]
     F -->|Exceeded| Error1[Raise AdapterNotFoundError rate_limit_exceeded]
     F -->|Allowed| G
     G --> H[db.flush]
@@ -478,11 +361,9 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    T[MessagingTemplate]
     M[Messaging]
     MM[ModuleMessagingMapping]
     S[MessagingStatus]
-    T -->|template_id| M
     M -->|status| S
     MM -->|module_name| M
 ```

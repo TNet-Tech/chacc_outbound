@@ -1,16 +1,14 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 from sqlalchemy import select
-from jinja2 import Environment, StrictUndefined
 
-from .models import MessagingTemplate, Messaging, ModuleMessagingMapping, MessagingStatus
+from .models import Messaging, ModuleMessagingMapping, MessagingStatus
 from .adapters import MessagingAdapterRegistry
-from .exceptions import TemplateNotFoundError, VariableValidationError, AdapterNotFoundError
+from .exceptions import AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
-jinja_env = Environment(undefined=StrictUndefined)
 
 
 class MessagingService:
@@ -30,69 +28,6 @@ class MessagingService:
     async def send(
         self,
         db,
-        template_key: str,
-        recipient_id: str,
-        recipient_contact: str,
-        variables: dict,
-        module_name: str,
-        channel: Optional[str] = None,
-        metadata: Optional[dict] = None,
-        overrides: Optional[dict] = None,
-    ) -> Messaging:
-        template = self._get_template_by_key(db, template_key, module_name)
-        if not template:
-            raise TemplateNotFoundError(template_key)
-
-        self._validate_variables(template, variables)
-
-        effective_channel = channel or template.channel
-
-        mapping = self._get_module_mapping(db, module_name)
-        rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
-        if rate_limit and self.redis:
-            key = f"messaging:rate:{module_name}:{effective_channel}"
-            current = await self.redis.incr(key)
-            if current == 1:
-                await self.redis.expire(key, 60)
-            if current > rate_limit:
-                raise AdapterNotFoundError(effective_channel, f"rate_limit_exceeded:{rate_limit}")
-
-        subject = None
-        body = None
-        if template.subject_template:
-            subject = jinja_env.from_string(template.subject_template).render(**variables)
-        body = jinja_env.from_string(template.body_template).render(**variables)
-
-        notification = Messaging(
-            template_id=template.id,
-            module_name=module_name,
-            recipient_id=recipient_id,
-            channel=effective_channel,
-            recipient_contact=recipient_contact,
-            subject=subject,
-            body=body,
-            notification_metadata=metadata,
-            status=MessagingStatus.PENDING,
-        )
-        db.add(notification)
-        db.flush()
-
-        task = asyncio.create_task(
-            self._deliver_async(
-                messaging_id=notification.id,
-                template=template,
-                variables=variables,
-                overrides=overrides,
-            )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-        return notification
-
-    async def send_direct(
-        self,
-        db,
         recipient_id: str,
         recipient_contact: str,
         body: str,
@@ -102,6 +37,7 @@ class MessagingService:
         adapter_name: str = "console",
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
+        content_type: str = "text/plain",
     ) -> Messaging:
         mapping = self._get_module_mapping(db, module_name)
         rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
@@ -114,7 +50,6 @@ class MessagingService:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
 
         notification = Messaging(
-            template_id=None,
             module_name=module_name,
             recipient_id=recipient_id,
             channel=channel,
@@ -130,10 +65,9 @@ class MessagingService:
         task = asyncio.create_task(
             self._deliver_async(
                 messaging_id=notification.id,
-                template=None,
-                variables=None,
                 adapter_name=adapter_name,
                 overrides=overrides,
+                content_type=content_type,
             )
         )
         self._tasks.add(task)
@@ -144,10 +78,9 @@ class MessagingService:
     async def _deliver_async(
         self,
         messaging_id: int,
-        template: Optional[MessagingTemplate] = None,
-        variables: Optional[dict] = None,
         adapter_name: Optional[str] = None,
         overrides: Optional[dict] = None,
+        content_type: str = "text/plain",
     ) -> None:
         context = self.module_context
         db = None
@@ -165,24 +98,29 @@ class MessagingService:
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
-            effective_adapter_name = adapter_name or (template.adapter_name if template else "console")
-            adapter = self.adapters.get(
-                channel=messaging.channel,
-                adapter_name=effective_adapter_name,
-            )
+            effective_adapter_name = adapter_name or mapping.default_adapter_name if mapping else "console"
+            try:
+                adapter = self.adapters.get(
+                    channel=messaging.channel,
+                    adapter_name=effective_adapter_name,
+                )
+            except AdapterNotFoundError as e:
+                messaging.status = MessagingStatus.FAILED
+                messaging.last_error = str(e)
+                db.commit()
+                return
 
             last_error = None
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await adapter.send(
                         messaging_id=str(messaging.id),
-                        template=template,
                         recipient_id=messaging.recipient_id,
                         recipient_contact=messaging.recipient_contact,
-                        variables=variables or {},
                         metadata=messaging.notification_metadata,
                         subject=messaging.subject,
                         body=messaging.body,
+                        content_type=content_type,
                     )
 
                     if result.status == "sent":
@@ -240,56 +178,26 @@ class MessagingService:
         self,
         mapping: Optional[ModuleMessagingMapping],
         key: str,
-        default: int,
+        default: Optional[int],
         overrides: Optional[dict],
-    ) -> int:
+    ) -> Optional[int]:
         if overrides and key in overrides:
             return overrides[key]
         if mapping and hasattr(mapping, key) and getattr(mapping, key) is not None:
             return getattr(mapping, key)
         return default
 
-    async def create_template(
-        self,
-        db,
-        template_key: str,
-        module_name: str,
-        channel: str,
-        adapter_name: str,
-        subject_template: Optional[str],
-        body_template: str,
-        email_type: Optional[str] = None,
-        variables_schema: Optional[dict] = None,
-        description: Optional[str] = None,
-    ) -> MessagingTemplate:
-        existing = self._get_template_by_key(db, template_key, module_name)
-        if existing:
-            raise ValueError(
-                f"Template '{template_key}' already exists for module '{module_name}'"
-            )
-
-        template = MessagingTemplate(
-            template_key=template_key,
-            module_name=module_name,
-            channel=channel,
-            adapter_name=adapter_name,
-            subject_template=subject_template,
-            body_template=body_template,
-            email_type=email_type,
-            variables_schema=variables_schema or {},
-            description=description,
+    def get_notification(self, db, notification_uuid: str) -> Optional[Messaging]:
+        result = db.execute(
+            select(Messaging).where(Messaging.uuid == notification_uuid)
         )
+        return result.scalar_one_or_none()
 
-        db.add(template)
-        db.flush()
-        return template
-
-    def list_templates(self, db, module_name: Optional[str] = None):
-        stmt = select(MessagingTemplate)
-        if module_name:
-            stmt = stmt.where(MessagingTemplate.module_name == module_name)
-        result = db.execute(stmt)
-        return result.scalars().all()
+    async def get_status(self, db, notification_uuid: str) -> Optional[MessagingStatus]:
+        notification = self.get_notification(db, notification_uuid)
+        if notification:
+            return notification.status
+        return None
 
     def get_module_mapping(self, db, module_name: str) -> Optional[ModuleMessagingMapping]:
         result = db.execute(
@@ -305,8 +213,6 @@ class MessagingService:
         module_name: str,
         default_adapter_name: Optional[str] = None,
         default_channel: Optional[str] = None,
-        default_template_key: Optional[str] = None,
-        default_channels: Optional[list] = None,
         max_retry_attempts: Optional[int] = None,
         retry_backoff_seconds: Optional[int] = None,
         rate_limit_per_minute: Optional[int] = None,
@@ -319,10 +225,6 @@ class MessagingService:
                 mapping.default_adapter_name = default_adapter_name
             if default_channel is not None:
                 mapping.default_channel = default_channel
-            if default_template_key is not None:
-                mapping.default_template_key = default_template_key
-            if default_channels is not None:
-                mapping.default_channels = default_channels
             if max_retry_attempts is not None:
                 mapping.max_retry_attempts = max_retry_attempts
             if retry_backoff_seconds is not None:
@@ -338,8 +240,6 @@ class MessagingService:
                 module_name=module_name,
                 default_adapter_name=default_adapter_name or "console",
                 default_channel=default_channel or "email",
-                default_template_key=default_template_key,
-                default_channels=default_channels or ["email"],
                 max_retry_attempts=max_retry_attempts or 3,
                 retry_backoff_seconds=retry_backoff_seconds or 300,
                 rate_limit_per_minute=rate_limit_per_minute,
@@ -349,47 +249,3 @@ class MessagingService:
             db.add(mapping)
         db.flush()
         return mapping
-
-    def get_notification(self, db, notification_uuid: str) -> Optional[Messaging]:
-        result = db.execute(
-            select(Messaging).where(Messaging.uuid == notification_uuid)
-        )
-        return result.scalar_one_or_none()
-
-    async def get_status(self, db, notification_uuid: str) -> Optional[MessagingStatus]:
-        notification = self.get_notification(db, notification_uuid)
-        if notification:
-            return notification.status
-        return None
-
-    def _get_template(self, db, template_key: str) -> Optional[MessagingTemplate]:
-        result = db.execute(
-            select(MessagingTemplate).where(
-                MessagingTemplate.template_key == template_key,
-                MessagingTemplate.is_active == True,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    def _get_template_by_key(
-        self, db, template_key: str, module_name: str
-    ) -> Optional[MessagingTemplate]:
-        result = db.execute(
-            select(MessagingTemplate).where(
-                MessagingTemplate.template_key == template_key,
-                MessagingTemplate.module_name == module_name,
-                MessagingTemplate.is_active == True,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    def _validate_variables(self, template: MessagingTemplate, variables: dict) -> None:
-        schema = template.variables_schema or {}
-
-        for var_name, var_spec in schema.items():
-            if var_spec.get("required", False) and var_name not in variables:
-                raise VariableValidationError(f"Missing required variable: {var_name}")
-
-        for var_name in variables:
-            if var_name not in schema:
-                logger.warning(f"Unknown variable in template: {var_name}")

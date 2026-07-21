@@ -3,7 +3,7 @@
   "display_name": "Messaging Module",
   "version": "0.1.0",
   "author": "ChaCC API Team",
-  "description": "A ChaCC module providing email and SMS messaging via templates and adapters.",
+  "description": "A ChaCC module providing email and SMS messaging via adapters.",
   "entry_point": "chacc_messaging_src.main:setup_plugin",
   "test_entry_point": "chacc_messaging_src.tests.test_module:run_module_tests",
   "base_path_prefix": "/messaging",

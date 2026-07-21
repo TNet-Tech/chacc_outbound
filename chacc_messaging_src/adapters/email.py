@@ -4,7 +4,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
-from jinja2 import Environment, StrictUndefined
 
 from .base import BaseMessagingAdapter, SendResult
 
@@ -15,45 +14,32 @@ class EmailMessagingAdapter(BaseMessagingAdapter):
 
     def __init__(self, smtp_config: Optional[dict] = None):
         self.smtp_config = smtp_config
-        self.jinja_env = Environment(undefined=StrictUndefined)
 
     async def send(
         self,
         messaging_id: str,
-        template,
         recipient_id: str,
         recipient_contact: str,
-        variables: dict,
         metadata: Optional[dict] = None,
         subject: Optional[str] = None,
         body: Optional[str] = None,
+        content_type: str = "text/plain",
     ) -> SendResult:
         try:
-            if not await self.validate_contact(recipient_contact):
+            if self.smtp_config and not await self.validate_contact(recipient_contact):
                 return SendResult(
                     status="failed",
                     error_message="Invalid email address",
                 )
 
-            if template:
-                subject_template_obj = self.jinja_env.from_string(
-                    template.subject_template or ""
-                )
-                subject = subject_template_obj.render(**variables)
-
-                body_template_obj = self.jinja_env.from_string(
-                    template.body_template
-                )
-                body = body_template_obj.render(**variables)
-            else:
-                subject = subject or ""
-                body = body or ""
+            subject = subject or ""
+            body = body or ""
 
             message_id = await self._send_email(
                 to=recipient_contact,
                 subject=subject,
                 body=body,
-                is_html=(template.email_type == "html" if template else False),
+                content_type=content_type,
             )
 
             return SendResult(
@@ -77,27 +63,33 @@ class EmailMessagingAdapter(BaseMessagingAdapter):
         to: str,
         subject: str,
         body: str,
-        is_html: bool,
+        content_type: str = "text/plain",
     ) -> str:
+        subtype = "plain" if content_type == "text/plain" else content_type
+
         if not self.smtp_config:
             print(f"\n{'='*80}")
             print(f"EMAIL (Console Backend)")
             print(f"{'='*80}")
             print(f"To: {to}")
             print(f"Subject: {subject}")
-            print(f"Type: {'HTML' if is_html else 'Text'}")
+            print(f"Type: {'HTML' if subtype == 'html' else 'Text'}")
             print(f"{'-'*80}")
             print(body)
             print(f"{'='*80}\n")
             return f"console_{uuid.uuid4()}"
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = self.smtp_config.get("from_email", "noreply@example.com")
-        msg["To"] = to
-
-        content_type = "html" if is_html else "plain"
-        msg.attach(MIMEText(body, content_type))
+        if subtype == "html":
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = self.smtp_config.get("from_email", "noreply@example.com")
+            msg["To"] = to
+            msg.attach(MIMEText(body, subtype))
+        else:
+            msg = MIMEText(body, subtype)
+            msg["Subject"] = subject
+            msg["From"] = self.smtp_config.get("from_email", "noreply@example.com")
+            msg["To"] = to
 
         with smtplib.SMTP(
             self.smtp_config["host"],

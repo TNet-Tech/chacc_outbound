@@ -1,4 +1,4 @@
-def get_notification_config(module_context) -> dict:
+def get_messaging_config(module_context) -> dict:
     if module_context is None:
         return {
             "ENVIRONMENT": "development",

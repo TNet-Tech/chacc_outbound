@@ -25,7 +25,6 @@ class BaseMessagingAdapter(ABC):
     Abstract base for messaging adapters.
 
     Each adapter handles one channel (email, sms, push).
-    All use Jinja2 for template variable substitution.
     """
 
     name: str = "base"
@@ -35,13 +34,12 @@ class BaseMessagingAdapter(ABC):
     async def send(
         self,
         messaging_id: str,
-        template,
         recipient_id: str,
         recipient_contact: str,
-        variables: dict,
         metadata: Optional[dict] = None,
         subject: Optional[str] = None,
         body: Optional[str] = None,
+        content_type: str = "text/plain",
     ) -> SendResult:
         """Send notification via this adapter's channel."""
         pass
