@@ -5,10 +5,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
-from .base import BaseMessagingAdapter, SendResult
+from .base import BaseOutboundAdapter, SendResult
 
 
-class EmailMessagingAdapter(BaseMessagingAdapter):
+class EmailOutboundAdapter(BaseOutboundAdapter):
     name = "smtp"
     channel = "email"
 
@@ -17,7 +17,7 @@ class EmailMessagingAdapter(BaseMessagingAdapter):
 
     async def send(
         self,
-        messaging_uuid: str,
+        outbound_messaging_uuid: str,
         recipient_id: str,
         recipient_contact: str,
         metadata: Optional[dict] = None,
@@ -35,7 +35,7 @@ class EmailMessagingAdapter(BaseMessagingAdapter):
             subject = subject or ""
             body = body or ""
 
-            message_id = await self._send_email(
+            outbound_message_uuid = await self._send_email(
                 to=recipient_contact,
                 subject=subject,
                 body=body,

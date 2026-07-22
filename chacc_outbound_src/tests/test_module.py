@@ -1,46 +1,46 @@
 """
-Tests for chacc_messaging module.
+Tests for chacc_outbound module.
 """
 import pytest
 import asyncio
 import sys
 import os
 
-from ..models import Messaging, ModuleMessagingMapping, MessagingStatus
+from ..models import Outbound, OutboundModuleMapping, OutboundStatus
 from ..exceptions import AdapterNotFoundError
-from ..config import get_messaging_config
-from ..adapters import ConsoleMessagingAdapter, EmailMessagingAdapter, MessagingAdapterRegistry
+from ..config import get_outbound_config
+from ..adapters import ConsoleOutboundAdapter, EmailOutboundAdapter, OutboundAdapterRegistry
 
 
 def test_models_import():
-    assert Messaging is not None
-    assert ModuleMessagingMapping is not None
-    assert MessagingStatus is not None
+    assert Outbound is not None
+    assert OutboundModuleMapping is not None
+    assert OutboundStatus is not None
 
 
 def test_messaging_status_enum():
-    assert MessagingStatus.PENDING == "PENDING"
-    assert MessagingStatus.SENT == "SENT"
-    assert MessagingStatus.FAILED == "FAILED"
-    assert MessagingStatus.RETRYING == "RETRYING"
+    assert OutboundStatus.PENDING == "PENDING"
+    assert OutboundStatus.SENT == "SENT"
+    assert OutboundStatus.FAILED == "FAILED"
+    assert OutboundStatus.RETRYING == "RETRYING"
 
 
 def test_messaging_creation():
-    messaging = Messaging(
+    messaging = Outbound(
         module_name="order_service",
         recipient_id="user_123",
         channel="email",
         recipient_contact="user@example.com",
         body="Order shipped",
-        status=MessagingStatus.PENDING,
+        status=OutboundStatus.PENDING,
     )
     assert messaging.recipient_id == "user_123"
     assert messaging.channel == "email"
-    assert messaging.status == MessagingStatus.PENDING
+    assert messaging.status == OutboundStatus.PENDING
 
 
 def test_module_messaging_mapping_creation():
-    mapping = ModuleMessagingMapping(
+    mapping = OutboundModuleMapping(
         module_name="order_service",
         max_retry_attempts=3,
         retry_backoff_seconds=300,
@@ -50,7 +50,7 @@ def test_module_messaging_mapping_creation():
 
 
 def test_module_messaging_mapping_defaults():
-    mapping = ModuleMessagingMapping(
+    mapping = OutboundModuleMapping(
         module_name="order_service",
     )
     assert mapping.module_name == "order_service"
@@ -73,7 +73,7 @@ def test_router_exists():
 
 
 def test_get_messaging_config_without_context():
-    config = get_messaging_config(None)
+    config = get_outbound_config(None)
     assert config["EMAIL_BACKEND"] == "console"
     assert config["EMAIL_SMTP_HOST"] == ""
     assert config["EMAIL_SMTP_PORT"] == 587
@@ -94,7 +94,7 @@ def test_get_messaging_config_with_context():
             }
             return mapping.get(key, default)
 
-    config = get_messaging_config(MockContext())
+    config = get_outbound_config(MockContext())
     assert config["ENVIRONMENT"] == "production"
     assert config["EMAIL_BACKEND"] == "smtp"
     assert config["EMAIL_SMTP_HOST"] == "smtp.example.com"
@@ -105,10 +105,10 @@ def test_get_messaging_config_with_context():
 
 
 def test_console_adapter_send_direct():
-    adapter = ConsoleMessagingAdapter()
+    adapter = ConsoleOutboundAdapter()
     result = asyncio.run(
         adapter.send(
-            messaging_uuid="test-uuid-1",
+            outbound_messaging_uuid="test-uuid-1",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Direct subject",
@@ -121,16 +121,16 @@ def test_console_adapter_send_direct():
 
 
 def test_email_adapter_validate_contact():
-    adapter = EmailMessagingAdapter(smtp_config=None)
+    adapter = EmailOutboundAdapter(smtp_config=None)
     assert asyncio.run(adapter.validate_contact("user@example.com")) is True
     assert asyncio.run(adapter.validate_contact("invalid")) is False
 
 
 def test_email_adapter_send_console_backend_html():
-    adapter = EmailMessagingAdapter(smtp_config=None)
+    adapter = EmailOutboundAdapter(smtp_config=None)
     result = asyncio.run(
         adapter.send(
-            messaging_uuid="test-uuid-2",
+            outbound_messaging_uuid="test-uuid-2",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Test",
@@ -143,10 +143,10 @@ def test_email_adapter_send_console_backend_html():
 
 
 def test_email_adapter_send_console_backend_text():
-    adapter = EmailMessagingAdapter(smtp_config=None)
+    adapter = EmailOutboundAdapter(smtp_config=None)
     result = asyncio.run(
         adapter.send(
-            messaging_uuid="test-uuid-3",
+            outbound_messaging_uuid="test-uuid-3",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Test",
@@ -159,32 +159,32 @@ def test_email_adapter_send_console_backend_text():
 
 
 def test_messaging_adapter_registry_register_and_get():
-    registry = MessagingAdapterRegistry()
-    adapter = ConsoleMessagingAdapter()
+    registry = OutboundAdapterRegistry()
+    adapter = ConsoleOutboundAdapter()
     registry.register(adapter=adapter, channel="email", name="console", set_default=True)
     retrieved = registry.get(channel="email", adapter_name="console")
     assert retrieved is adapter
 
 
 def test_messaging_adapter_registry_default():
-    registry = MessagingAdapterRegistry()
-    adapter = ConsoleMessagingAdapter()
+    registry = OutboundAdapterRegistry()
+    adapter = ConsoleOutboundAdapter()
     registry.register(adapter=adapter, channel="email", name="console", set_default=True)
     default = registry.get_default("email")
     assert default is adapter
 
 
 def test_messaging_adapter_registry_list():
-    registry = MessagingAdapterRegistry()
-    registry.register(adapter=ConsoleMessagingAdapter(), channel="email", name="console", set_default=True)
-    registry.register(adapter=EmailMessagingAdapter(smtp_config=None), channel="email", name="smtp")
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
+    registry.register(adapter=EmailOutboundAdapter(smtp_config=None), channel="email", name="smtp")
     adapters = registry.list_adapters()
     assert "email" in adapters
     assert len(adapters["email"]) == 2
 
 
 def test_messaging_adapter_registry_missing():
-    registry = MessagingAdapterRegistry()
+    registry = OutboundAdapterRegistry()
     try:
         registry.get(channel="sms")
         assert False, "Expected AdapterNotFoundError"
@@ -192,21 +192,21 @@ def test_messaging_adapter_registry_missing():
         pass
 
 
-def test_service_send_creates_notification():
-    from ..service import MessagingService
-    from ..adapters import MessagingAdapterRegistry
+def test_service_send_returns_serialized_dict():
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry
     from unittest.mock import MagicMock
 
-    registry = MessagingAdapterRegistry()
-    registry.register(adapter=ConsoleMessagingAdapter(), channel="email", name="console", set_default=True)
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     mock_context = MagicMock()
     mock_context.get_db.return_value.__aiter__ = lambda self: self
     mock_context.get_db.return_value.__anext__ = MagicMock(side_effect=StopAsyncIteration)
 
-    service = MessagingService(
+    service = OutboundService(
         adapter_registry=registry,
-        config=get_messaging_config(None),
+        config=get_outbound_config(None),
         module_context=mock_context,
     )
 
@@ -214,7 +214,7 @@ def test_service_send_creates_notification():
     mock_db.add = MagicMock()
     mock_db.flush = MagicMock()
 
-    notification = asyncio.run(
+    result = asyncio.run(
         service.send(
             db=mock_db,
             recipient_id="user_123",
@@ -227,34 +227,107 @@ def test_service_send_creates_notification():
             content_type="text/plain",
         )
     )
-    assert notification.module_name == "order_service"
-    assert notification.recipient_id == "user_123"
-    assert notification.channel == "email"
-    assert notification.subject == "Direct subject"
-    assert notification.body == "Direct body"
+    assert isinstance(result, dict)
+    assert result["module_name"] == "order_service"
+    assert result["recipient_id"] == "user_123"
+    assert result["channel"] == "email"
+    assert result["subject"] == "Direct subject"
+    assert result["body"] == "Direct body"
+    assert result["status"] == "PENDING"
+    assert result["outbound_metadata"] is None
+    assert result["sent_at"] is None
+    assert result["attempts"] == 0
+    assert result["last_error"] is None
 
 
 def test_service_rate_limit_without_redis():
-    from ..service import MessagingService
-    from ..adapters import MessagingAdapterRegistry
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry
     from unittest.mock import MagicMock
 
-    registry = MessagingAdapterRegistry()
-    registry.register(adapter=ConsoleMessagingAdapter(), channel="email", name="console", set_default=True)
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
-    service = MessagingService(
+    service = OutboundService(
         adapter_registry=registry,
-        config=get_messaging_config(None),
+        config=get_outbound_config(None),
         module_context=MagicMock(),
         redis=None,
     )
 
     mock_db = MagicMock()
-    mapping = ModuleMessagingMapping(
+    mapping = OutboundModuleMapping(
         module_name="order_service",
         rate_limit_per_minute=10,
     )
     assert service._apply_overrides(mapping, "rate_limit_per_minute", None, None) == 10
+
+
+def test_service_get_status_returns_status():
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry
+    from unittest.mock import MagicMock
+
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
+
+    service = OutboundService(
+        adapter_registry=registry,
+        config=get_outbound_config(None),
+        module_context=MagicMock(),
+    )
+
+    mock_db = MagicMock()
+    mock_notification = MagicMock()
+    mock_notification.status = OutboundStatus.SENT
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_notification
+
+    status = service.get_status(mock_db, "test-uuid")
+    assert status == OutboundStatus.SENT
+
+
+def test_service_get_status_returns_none_when_not_found():
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry
+    from unittest.mock import MagicMock
+
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
+
+    service = OutboundService(
+        adapter_registry=registry,
+        config=get_outbound_config(None),
+        module_context=MagicMock(),
+    )
+
+    mock_db = MagicMock()
+    mock_db.execute.return_value.scalar_one_or_none.return_value = None
+
+    status = service.get_status(mock_db, "missing-uuid")
+    assert status is None
+
+
+def test_service_get_status_failed():
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry
+    from unittest.mock import MagicMock
+
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
+
+    service = OutboundService(
+        adapter_registry=registry,
+        config=get_outbound_config(None),
+        module_context=MagicMock(),
+    )
+
+    mock_db = MagicMock()
+    mock_notification = MagicMock()
+    mock_notification.status = OutboundStatus.FAILED
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_notification
+
+    status = service.get_status(mock_db, "test-uuid")
+    assert status == OutboundStatus.FAILED
 
 
 def run_module_tests():

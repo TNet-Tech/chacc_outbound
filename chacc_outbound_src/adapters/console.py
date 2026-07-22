@@ -1,10 +1,10 @@
 import uuid
 from typing import Optional
 
-from .base import BaseMessagingAdapter, SendResult
+from .base import BaseOutboundAdapter, SendResult
 
 
-class ConsoleMessagingAdapter(BaseMessagingAdapter):
+class ConsoleOutboundAdapter(BaseOutboundAdapter):
     name = "console"
     channel = "email"
 

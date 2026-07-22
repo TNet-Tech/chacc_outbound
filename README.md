@@ -1,4 +1,4 @@
-# chacc_messaging
+# chacc_outbound
 
 A ChaCC module providing **email and SMS messaging** via adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
 
@@ -17,13 +17,13 @@ A ChaCC module providing **email and SMS messaging** via adapters. Other modules
 1. Ensure the module is available in your ChaCC plugins directory:
 
 ```
-plugins/chacc_messaging/
+plugins/chacc_outbound/
 ```
 
 2. Install dependencies:
 
 ```bash
-pip install -r plugins/chacc_messaging/requirements.txt
+pip install -r plugins/chacc_outbound/requirements.txt
 ```
 
 ## Configuration
@@ -59,7 +59,7 @@ When `EMAIL_BACKEND=console` or `EMAIL_SMTP_HOST` is empty, messages print to st
 ### From another module (programmatic)
 
 ```python
-from chacc_messaging_src.context_factory import get_messaging_service, get_db
+from chacc_outbound_src.context_factory import get_messaging_service, get_db
 
 # Get the service from context
 messaging_service = get_messaging_service()
@@ -198,7 +198,7 @@ status = await messaging_service.get_status(db, notification_uuid)
 Implement `BaseMessagingAdapter` to add new channels (SMS, push, etc.).
 
 ```python
-from chacc_messaging_src.adapters.base import BaseMessagingAdapter, SendResult
+from chacc_outbound_src.adapters.base import BaseMessagingAdapter, SendResult
 
 class SMSMessagingAdapter(BaseMessagingAdapter):
     name = "twilio"
@@ -229,7 +229,7 @@ class SMSMessagingAdapter(BaseMessagingAdapter):
 Register the adapter in `setup_plugin()`:
 
 ```python
-from chacc_messaging_src.adapters import MessagingAdapterRegistry, SMSMessagingAdapter
+from chacc_outbound_src.adapters import MessagingAdapterRegistry, SMSMessagingAdapter
 
 registry = MessagingAdapterRegistry()
 registry.register(
@@ -247,7 +247,7 @@ The service raises specific exceptions:
 - `AdapterNotFoundError` — no adapter registered for the channel
 
 ```python
-from chacc_messaging_src.exceptions import AdapterNotFoundError
+from chacc_outbound_src.exceptions import AdapterNotFoundError
 
 try:
     message = await messaging_service.send(...)
@@ -261,7 +261,7 @@ except AdapterNotFoundError as e:
 
 ```mermaid
 flowchart TD
-    subgraph chacc_messaging[chacc_messaging Module]
+    subgraph chacc_outbound[chacc_outbound Module]
         REST[REST API - FastAPI /messaging/*]
         PROG[Programmatic API - MessagingService]
         
@@ -382,20 +382,20 @@ class BaseMessagingAdapter:
 ## Running Tests
 
 ```bash
-pytest plugins/chacc_messaging/chacc_messaging_src/tests/ -v
+pytest plugins/chacc_outbound/chacc_outbound_src/tests/ -v
 ```
 
 Or using the standalone runner:
 
 ```bash
-python plugins/chacc_messaging/chacc_messaging_src/run_tests.py
+python plugins/chacc_outbound/chacc_outbound_src/run_tests.py
 ```
 
 ## Project Structure
 
 ```
-plugins/chacc_messaging/
-├── chacc_messaging_src/
+plugins/chacc_outbound/
+├── chacc_outbound_src/
 │   ├── main.py              # Plugin entry point
 │   ├── config.py            # Configuration loader
 │   ├── context_factory.py   # Context and service access helpers

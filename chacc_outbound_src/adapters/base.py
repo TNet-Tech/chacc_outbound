@@ -10,19 +10,19 @@ class SendResult:
     def __init__(
         self,
         status: str,
-        message_id: Optional[str] = None,
+        outbound_message_uuid: Optional[str] = None,
         error_message: Optional[str] = None,
         metadata: Optional[dict] = None,
     ):
         self.status = status
-        self.message_id = message_id
+        self.message_id = outbound_message_uuid
         self.error_message = error_message
         self.metadata = metadata or {}
 
 
-class BaseMessagingAdapter(ABC):
+class BaseOutboundAdapter(ABC):
     """
-    Abstract base for messaging adapters.
+    Abstract base for outbound adapters.
 
     Each adapter handles one channel (email, sms, push).
     """
@@ -41,7 +41,7 @@ class BaseMessagingAdapter(ABC):
         body: Optional[str] = None,
         content_type: str = "text/plain",
     ) -> SendResult:
-        """Send notification via this adapter's channel."""
+        """Send outbound message via this adapter's channel."""
         pass
 
     @abstractmethod
@@ -54,7 +54,7 @@ class BaseMessagingAdapter(ABC):
         return True
 
 
-class MessagingAdapterRegistry:
+class OutboundAdapterRegistry:
     """Manages registered adapters by channel."""
 
     def __init__(self):
@@ -63,7 +63,7 @@ class MessagingAdapterRegistry:
 
     def register(
         self,
-        adapter: BaseMessagingAdapter,
+        adapter: BaseOutboundAdapter,
         channel: str,
         name: Optional[str] = None,
         set_default: bool = False,
@@ -80,7 +80,7 @@ class MessagingAdapterRegistry:
         self,
         channel: str,
         adapter_name: Optional[str] = None,
-    ) -> BaseMessagingAdapter:
+    ) -> BaseOutboundAdapter:
         """Get adapter by channel and optional name."""
         name = adapter_name or self._defaults.get(channel)
         if not name:
@@ -102,7 +102,7 @@ class MessagingAdapterRegistry:
             result[channel].append({"name": name, "class": adapter.__class__.__name__})
         return result
 
-    def get_default(self, channel: str) -> Optional[BaseMessagingAdapter]:
+    def get_default(self, channel: str) -> Optional[BaseOutboundAdapter]:
         """Get the default adapter for a channel."""
         name = self._defaults.get(channel)
         if not name:

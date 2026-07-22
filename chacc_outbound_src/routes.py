@@ -4,17 +4,16 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .context_factory import get_db, get_module_context, get_messaging_service
-from .models import Messaging, ModuleMessagingMapping, MessagingStatus
-from .service import MessagingService
-from .adapters import MessagingAdapterRegistry
+from .context_factory import get_db, get_outbound_service
+from .models import Outbound
+from .service import OutboundService
 from .exceptions import AdapterNotFoundError
 
 
 router = APIRouter()
 
 
-class SendNotificationRequest(BaseModel):
+class SendOutboundRequest(BaseModel):
     module_name: str = Field(..., description="Module name sending the notification")
     recipient_id: str = Field(..., description="User/entity identifier")
     recipient_contact: str = Field(..., description="Email address or phone number")
@@ -33,7 +32,7 @@ class SendNotificationRequest(BaseModel):
         return v
 
 
-class MessagingResponse(BaseModel):
+class OutboundResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     uuid: str
@@ -43,15 +42,15 @@ class MessagingResponse(BaseModel):
     subject: Optional[str]
     body: str
     recipient_contact: str
-    notification_metadata: Optional[dict]
+    outbound_metadata: Optional[dict]
     status: str
     sent_at: Optional[str]
     attempts: int
     last_error: Optional[str]
 
 
-def _serialize_notification(n) -> MessagingResponse:
-    return MessagingResponse(
+def _serialize_outbound(n) -> OutboundResponse:
+    return OutboundResponse(
         uuid=str(n.uuid),
         module_name=n.module_name,
         recipient_id=n.recipient_id,
@@ -59,7 +58,7 @@ def _serialize_notification(n) -> MessagingResponse:
         subject=n.subject,
         body=n.body,
         recipient_contact=n.recipient_contact,
-        notification_metadata=n.messaging_metadata,
+        outbound_metadata=n.messaging_metadata,
         status=n.status.value,
         sent_at=n.sent_at.isoformat() if n.sent_at else None,
         attempts=n.attempts,
@@ -67,14 +66,14 @@ def _serialize_notification(n) -> MessagingResponse:
     )
 
 
-@router.post("/send", response_model=MessagingResponse)
-async def send_notification(
-    payload: SendNotificationRequest,
-    service: MessagingService = Depends(get_messaging_service),
+@router.post("/send", response_model=OutboundResponse)
+async def send_outbound(
+    payload: SendOutboundRequest,
+    service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
     try:
-        message = await service.send(
+        return await service.send(
             db=db,
             recipient_id=payload.recipient_id,
             recipient_contact=payload.recipient_contact,
@@ -86,55 +85,53 @@ async def send_notification(
             metadata=payload.metadata,
             content_type=payload.content_type,
         )
-        db.commit()
-        return _serialize_notification(message)
     except AdapterNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/messages", response_model=List[MessagingResponse])
-async def list_notifications(
+@router.get("/messages", response_model=List[OutboundResponse])
+async def list_outbounds(
     module_name: Optional[str] = Query(None, description="Filter by module name"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
     status: Optional[str] = Query(None, description="Filter by status"),
-    service: MessagingService = Depends(get_messaging_service),
+    service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
-    stmt = select(Messaging)
+    stmt = select(Outbound)
     if module_name:
-        stmt = stmt.where(Messaging.module_name == module_name)
+        stmt = stmt.where(Outbound.module_name == module_name)
     if channel:
-        stmt = stmt.where(Messaging.channel == channel)
+        stmt = stmt.where(Outbound.channel == channel)
     if status:
-        stmt = stmt.where(Messaging.status == status)
-    stmt = stmt.order_by(Messaging.created_at.desc())
+        stmt = stmt.where(Outbound.status == status)
+    stmt = stmt.order_by(Outbound.created_at.desc())
     result = db.execute(stmt)
     messaging_notifications = result.scalars().all()
 
-    return [_serialize_notification(n) for n in messaging_notifications]
+    return [_serialize_outbound(n) for n in messaging_notifications]
 
 
-@router.get("/messages/{notification_uuid}", response_model=MessagingResponse)
-async def get_notification(
+@router.get("/messages/{notification_uuid}", response_model=OutboundResponse)
+async def get_outbound(
     notification_uuid: str,
-    service: MessagingService = Depends(get_messaging_service),
+    service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
-    notification = await service.get_notification(db, notification_uuid)
-    if not notification:
+    outbound = await service.get_message(db, notification_uuid)
+    if not outbound:
         raise HTTPException(status_code=404, detail="Message not found")
-    return _serialize_notification(notification)
+    return _serialize_outbound(outbound)
 
 
-@router.get("/messages/{notification_uuid}/status")
-async def get_message_status(
-    notification_uuid: str,
-    service: MessagingService = Depends(get_messaging_service),
+@router.get("/messages/{outbound_message_uuid}/status")
+async def get_outbound_message_status(
+    outbound_message_uuid: str,
+    service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
-    status = await service.get_status(db, notification_uuid)
+    status = service.get_status(db, outbound_message_uuid)
     if status is None:
-        raise HTTPException(status_code=404, detail="Message not found")
-    return {"notification_uuid": notification_uuid, "status": status.value}
+        raise HTTPException(status_code=404, detail="Outbound Message not found")
+    return {"notification_uuid": outbound_message_uuid, "status": status.value}

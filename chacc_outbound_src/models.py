@@ -4,15 +4,15 @@ from chacc_api import ChaCCBaseModel, register_model
 from sqlalchemy import Column, String, Integer, Boolean, Text, JSON, Enum as SQLAEnum, DateTime
 
 
-class MessagingStatus(str, Enum):
+class OutboundStatus(str, Enum):
     PENDING = "PENDING"
     SENT = "SENT"
     FAILED = "FAILED"
     RETRYING = "RETRYING"
 
 
-class Messaging(ChaCCBaseModel):
-    __tablename__ = "messaging"
+class Outbound(ChaCCBaseModel):
+    __tablename__ = "outbound_messaging"
 
     module_name = Column(String(100), nullable=False)
     recipient_id = Column(String(100), nullable=False)
@@ -24,15 +24,15 @@ class Messaging(ChaCCBaseModel):
 
     messaging_metadata = Column(JSON, nullable=True)
 
-    status = Column(SQLAEnum(MessagingStatus), default=MessagingStatus.PENDING, nullable=False)
+    status = Column(SQLAEnum(OutboundStatus), default=OutboundStatus.PENDING, nullable=False)
     sent_at = Column(DateTime, nullable=True)
 
     attempts = Column(Integer, default=0)
     last_error = Column(String(500), nullable=True)
 
 
-class ModuleMessagingMapping(ChaCCBaseModel):
-    __tablename__ = "module_messaging_mappings"
+class OutboundModuleMapping(ChaCCBaseModel):
+    __tablename__ = "outbound_module_mappings"
 
     module_name = Column(String(100), primary_key=True)
 

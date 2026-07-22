@@ -1,7 +1,7 @@
 from typing import Optional
 
-from .service import MessagingService
-from .config import get_messaging_config
+from .service import OutboundService
+from .config import get_outbound_config
 
 
 _module_context = None
@@ -32,7 +32,7 @@ async def get_db():
         raise RuntimeError("Database not available")
 
 
-def get_messaging_service():
+def get_outbound_service():
     context = get_module_context()
     if context:
         return context.get_service("messaging_service")

@@ -4,17 +4,17 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import select
 
-from .models import Messaging, ModuleMessagingMapping, MessagingStatus
-from .adapters import MessagingAdapterRegistry
+from .models import Outbound, OutboundModuleMapping, OutboundStatus
+from .adapters import OutboundAdapterRegistry
 from .exceptions import AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
 
 
-class MessagingService:
+class OutboundService:
     def __init__(
         self,
-        adapter_registry: MessagingAdapterRegistry,
+        adapter_registry: OutboundAdapterRegistry,
         config: dict,
         module_context=None,
         redis=None,
@@ -38,19 +38,12 @@ class MessagingService:
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
-    ) -> Messaging:
+    ) -> dict:
         """
         Send a notification and enqueue async delivery.
 
-        Returns the created Messaging ORM instance. All internal async
-        delivery and status updates use uuid. The id column is kept for
-        internal DB operations only and is never exposed in API responses.
-
-        The returned object must be serialized before JSON response:
-            - str(message.uuid) for UUID
-            - message.status.value for enum
-            - message.sent_at.isoformat() if sent_at
-            - message.messaging_metadata for metadata
+        Returns a serialized dict representation of the created outbound record,
+        so callers don't need to manually serialize ORM attributes.
         """
         mapping = self.get_module_mapping(db, module_name)
         rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
@@ -62,7 +55,7 @@ class MessagingService:
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
 
-        messaging_notification = Messaging(
+        outbound_message = Outbound(
             module_name=module_name,
             recipient_id=recipient_id,
             channel=channel,
@@ -70,14 +63,14 @@ class MessagingService:
             subject=subject,
             body=body,
             messaging_metadata=metadata,
-            status=MessagingStatus.PENDING,
+            status=OutboundStatus.PENDING,
         )
-        db.add(messaging_notification)
+        db.add(outbound_message)
         db.flush()
 
         task = asyncio.create_task(
             self._deliver_async(
-                messaging_uuid=messaging_notification.uuid,
+                messaging_uuid=outbound_message.uuid,
                 adapter_name=adapter_name,
                 overrides=overrides,
                 content_type=content_type,
@@ -86,7 +79,23 @@ class MessagingService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-        return messaging_notification
+        return self._serialize_outbound(outbound_message)
+
+    def _serialize_outbound(self, n) -> dict:
+        return {
+            "uuid": str(n.uuid),
+            "module_name": n.module_name,
+            "recipient_id": n.recipient_id,
+            "channel": n.channel,
+            "subject": n.subject,
+            "body": n.body,
+            "recipient_contact": n.recipient_contact,
+            "outbound_metadata": n.messaging_metadata,
+            "status": n.status.value,
+            "sent_at": n.sent_at.isoformat() if n.sent_at else None,
+            "attempts": n.attempts,
+            "last_error": n.last_error,
+        }
 
     async def _deliver_async(
         self,
@@ -104,7 +113,7 @@ class MessagingService:
                 return
 
             messaging = db.execute(
-                select(Messaging).where(Messaging.uuid == messaging_uuid)
+                select(Outbound).where(Outbound.uuid == messaging_uuid)
             ).scalar_one_or_none()
             if not messaging:
                 return
@@ -120,9 +129,9 @@ class MessagingService:
                     adapter_name=effective_adapter_name,
                 )
             except AdapterNotFoundError as e:
-                messaging.status = MessagingStatus.FAILED
+                messaging.status = OutboundStatus.FAILED
                 messaging.last_error = str(e)
-                db.commit()
+                db.flush()
                 return
 
             last_error = None
@@ -139,19 +148,19 @@ class MessagingService:
                     )
 
                     if result.status == "sent":
-                        messaging.status = MessagingStatus.SENT
+                        messaging.status = OutboundStatus.SENT
                         messaging.sent_at = datetime.now(timezone.utc)
                         messaging.attempts = attempt
                         if result.error_message:
                             messaging.last_error = result.error_message
-                        db.commit()
+                        db.flush()
                         return
 
                     last_error = result.error_message or "Unknown error"
-                    messaging.status = MessagingStatus.RETRYING
+                    messaging.status = OutboundStatus.RETRYING
                     messaging.last_error = last_error
                     messaging.attempts = attempt
-                    db.commit()
+                    db.flush()
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
@@ -159,29 +168,29 @@ class MessagingService:
 
                 except Exception as e:
                     last_error = str(e)
-                    messaging.status = MessagingStatus.RETRYING
+                    messaging.status = OutboundStatus.RETRYING
                     messaging.last_error = last_error
                     messaging.attempts = attempt
-                    db.commit()
+                    db.flush()
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
 
-            messaging.status = MessagingStatus.FAILED
+            messaging.status = OutboundStatus.FAILED
             messaging.last_error = last_error or "Max retries exceeded"
-            db.commit()
+            db.flush()
 
         except Exception as e:
             if db:
                 try:
                     messaging = db.execute(
-                        select(Messaging).where(Messaging.uuid == messaging_uuid)
+                        select(Outbound).where(Outbound.uuid == messaging_uuid)
                     ).scalar_one_or_none()
                     if messaging:
-                        messaging.status = MessagingStatus.FAILED
+                        messaging.status = OutboundStatus.FAILED
                         messaging.last_error = str(e)
-                        db.commit()
+                        db.flush()
                 except Exception:
                     pass
         finally:
@@ -193,7 +202,7 @@ class MessagingService:
 
     def _apply_overrides(
         self,
-        mapping: Optional[ModuleMessagingMapping],
+        mapping: Optional[OutboundModuleMapping],
         key: str,
         default: Optional[int],
         overrides: Optional[dict],
@@ -204,22 +213,22 @@ class MessagingService:
             return getattr(mapping, key)
         return default
 
-    def get_notification(self, db, notification_uuid: str) -> Optional[Messaging]:
+    def get_message(self, db, outbound_messaging_uuid: str) -> Optional[Outbound]:
         result = db.execute(
-            select(Messaging).where(Messaging.uuid == notification_uuid)
+            select(Outbound).where(Outbound.uuid == outbound_messaging_uuid)
         )
         return result.scalar_one_or_none()
 
-    async def get_status(self, db, notification_uuid: str) -> Optional[MessagingStatus]:
-        notification = self.get_notification(db, notification_uuid)
-        if notification:
-            return notification.status
+    def get_status(self, db, outbound_messaging_uuid: str) -> Optional[OutboundStatus]:
+        message = self.get_message(db, outbound_messaging_uuid)
+        if message:
+            return message.status
         return None
 
-    def get_module_mapping(self, db, module_name: str) -> Optional[ModuleMessagingMapping]:
+    def get_module_mapping(self, db, module_name: str) -> Optional[OutboundModuleMapping]:
         result = db.execute(
-            select(ModuleMessagingMapping).where(
-                ModuleMessagingMapping.module_name == module_name
+            select(OutboundModuleMapping).where(
+                OutboundModuleMapping.module_name == module_name
             )
         )
         return result.scalar_one_or_none()
@@ -235,7 +244,7 @@ class MessagingService:
         rate_limit_per_minute: Optional[int] = None,
         is_active: Optional[bool] = None,
         description: Optional[str] = None,
-    ) -> ModuleMessagingMapping:
+    ) -> OutboundModuleMapping:
         mapping = self.get_module_mapping(db, module_name)
         if mapping:
             if default_adapter_name is not None:
@@ -253,7 +262,7 @@ class MessagingService:
             if description is not None:
                 mapping.description = description
         else:
-            mapping = ModuleMessagingMapping(
+            mapping = OutboundModuleMapping(
                 module_name=module_name,
                 default_adapter_name=default_adapter_name or "console",
                 default_channel=default_channel or "email",
