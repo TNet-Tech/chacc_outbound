@@ -10,12 +10,12 @@ class SendResult:
     def __init__(
         self,
         status: str,
-        outbound_message_uuid: Optional[str] = None,
+        message_id: Optional[str] = None,
         error_message: Optional[str] = None,
         metadata: Optional[dict] = None,
     ):
         self.status = status
-        self.message_id = outbound_message_uuid
+        self.message_id = message_id
         self.error_message = error_message
         self.metadata = metadata or {}
 

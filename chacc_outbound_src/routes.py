@@ -113,25 +113,25 @@ async def list_outbounds(
     return [_serialize_outbound(n) for n in messaging_notifications]
 
 
-@router.get("/messages/{notification_uuid}", response_model=OutboundResponse)
+@router.get("/messages/{outbound_uuid}", response_model=OutboundResponse)
 async def get_outbound(
-    notification_uuid: str,
+    outbound_uuid: str,
     service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
-    outbound = await service.get_message(db, notification_uuid)
+    outbound = await service.get_message(db, outbound_uuid)
     if not outbound:
         raise HTTPException(status_code=404, detail="Message not found")
     return _serialize_outbound(outbound)
 
 
-@router.get("/messages/{outbound_message_uuid}/status")
+@router.get("/messages/{outbound_uuid}/status")
 async def get_outbound_message_status(
-    outbound_message_uuid: str,
+    outbound_uuid: str,
     service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
-    status = service.get_status(db, outbound_message_uuid)
+    status = service.get_status(db, outbound_uuid)
     if status is None:
         raise HTTPException(status_code=404, detail="Outbound Message not found")
-    return {"notification_uuid": outbound_message_uuid, "status": status.value}
+    return {"uuid": outbound_uuid, "status": status.value}

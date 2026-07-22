@@ -1,16 +1,16 @@
 # ChaCC Outbound
 
-A ChaCC module providing **email and SMS messaging** via adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
+A ChaCC module providing **outbound messaging via adapters** (email, SMS, push, etc.). Other modules enqueue outbound messages through a unified service API or REST endpoints without worrying about delivery mechanics.
 
 ## Features
 
-- **Direct sends**: Send raw content instantly with full control over subject, body, channel, and adapter
+- **Direct sends**: Send content directly with full control over subject, body, channel, and adapter
 - **Email (HTML/Text)**: SMTP adapter + console adapter for development
-- **SMS**: Extensible adapter pattern for SMS providers (Twilio, etc.)
+- **SMS and more**: Extensible adapter pattern for SMS providers (Twilio, etc.)
 - **Retry & backoff**: Automatic retries with configurable backoff per module
 - **Async delivery**: Fire-and-forget with status tracking
-- **Programmatic API**: Other modules use `MessagingService` directly — no HTTP required
-- **REST API**: Admin endpoints for notifications and sending
+- **Programmatic API**: Other modules use `OutboundService` directly — no HTTP required
+- **REST API**: Admin endpoints for outbound records and sending
 
 ## Installation
 
@@ -59,42 +59,30 @@ When `EMAIL_BACKEND=console` or `EMAIL_SMTP_HOST` is empty, messages print to st
 ### From another module (programmatic)
 
 ```python
-from chacc_outbound_src.context_factory import get_messaging_service, get_db
+from chacc_outbound_src.context_factory import get_outbound_service, get_db
 
 # Get the service from context
-messaging_service = get_messaging_service()
-db = await get_db()
+outbound_service = get_outbound_service()
 
 # Send a message
-notification = await messaging_service.send(
-    db=db,
-    recipient_id=customer.id,
-    recipient_contact=customer.email,
-    subject="Your order has shipped",
-    body="Your order ORD-001 has been shipped. Tracking: TRK-456",
-    module_name="order_service",
-    channel="email",
-)
-
-# Send HTML email
-notification = await messaging_service.send(
-    db=db,
-    recipient_id=customer.id,
-    recipient_contact=customer.email,
-    subject="Your order has shipped",
-    body="<h1>Your order ORD-001 has shipped</h1>",
-    module_name="order_service",
-    channel="email",
-    content_type="html",
-)
-
-await db.commit()
+async for db in get_db():
+    result = await outbound_service.send(
+        db=db,
+        recipient_id=customer.id,
+        recipient_contact=customer.email,
+        subject="Your order has shipped",
+        body="Your order ORD-001 has been shipped. Tracking: TRK-456",
+        module_name="order_service",
+        channel="email",
+    )
+    # result is a dict: uuid, module_name, recipient_id, channel, subject, body, ...
+    await db.commit()
 ```
 
 ### Via REST API
 
 ```bash
-curl -X POST http://localhost:8000/messaging/send \
+curl -X POST http://localhost:8085/outbound/send \
   -H "Content-Type: application/json" \
   -d '{
     "module_name": "order_service",
@@ -116,7 +104,7 @@ Bypasses template lookup. Use this for all messaging — content is passed direc
 
 ```python
 # Email - text (default)
-notification = await messaging_service.send(
+result = await outbound_service.send(
     db=db,
     recipient_id="cust_123",
     recipient_contact="customer@example.com",
@@ -128,7 +116,7 @@ notification = await messaging_service.send(
 )
 
 # Email - HTML
-notification = await messaging_service.send(
+result = await outbound_service.send(
     db=db,
     recipient_id="cust_123",
     recipient_contact="customer@example.com",
@@ -141,7 +129,7 @@ notification = await messaging_service.send(
 )
 
 # SMS (subject not used, content_type defaults to text/plain)
-notification = await messaging_service.send(
+result = await outbound_service.send(
     db=db,
     recipient_id="cust_123",
     recipient_contact="+255712345678",
@@ -159,16 +147,16 @@ notification = await messaging_service.send(
 
 ## Module Mapping
 
-Define per-module defaults for adapter, channel, and retry policy via `ModuleMessagingMapping`.
+Define per-module defaults for adapter, channel, and retry policy via `OutboundModuleMapping`.
 
 ```python
-    mapping = messaging_service.create_or_update_module_mapping(
-        db=db,
-        module_name="order_service",
-        max_retry_attempts=5,
-        retry_backoff_seconds=60,
-        description="Order notifications with aggressive retry",
-    )
+mapping = outbound_service.create_or_update_module_mapping(
+    db=db,
+    module_name="order_service",
+    max_retry_attempts=5,
+    retry_backoff_seconds=60,
+    description="Order notifications with aggressive retry",
+)
 await db.commit()
 ```
 
@@ -178,35 +166,28 @@ These defaults apply when a send call does not specify the corresponding paramet
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/messaging/send` | Send message |
-| `GET` | `/messaging/notifications` | List notifications (filter: `module_name`, `channel`, `status`) |
-| `GET` | `/messaging/notifications/{uuid}` | Get notification by UUID |
-| `GET` | `/messaging/notifications/{uuid}/status` | Get notification status by UUID |
+| `POST` | `/outbound/send` | Send message |
+| `GET` | `/outbound/messages` | List outbound records (filter: `module_name`, `channel`, `status`) |
+| `GET` | `/outbound/messages/{uuid}` | Get outbound record by UUID |
+| `GET` | `/outbound/messages/{uuid}/status` | Get outbound status by UUID |
 
 ## Retrieving Messages
 
-```python
-# Get by UUID
-notification = messaging_service.get_notification(db, notification_uuid)
-
 # Get status only
-status = await messaging_service.get_status(db, notification_uuid)
-```
+status = outbound_service.get_status(db, outbound_uuid)
 
-## Custom Adapters
-
-Implement `BaseMessagingAdapter` to add new channels (SMS, push, etc.).
+Implement `BaseOutboundAdapter` to add new channels (SMS, push, etc.).
 
 ```python
-from chacc_outbound_src.adapters.base import BaseMessagingAdapter, SendResult
+from chacc_outbound_src.adapters.base import BaseOutboundAdapter, SendResult
 
-class SMSMessagingAdapter(BaseMessagingAdapter):
+class SMSOutboundAdapter(BaseOutboundAdapter):
     name = "twilio"
     channel = "sms"
 
     async def send(
         self,
-        messaging_id: str,
+        messaging_uuid: str,
         recipient_id: str,
         recipient_contact: str,
         metadata: Optional[dict] = None,
@@ -229,11 +210,11 @@ class SMSMessagingAdapter(BaseMessagingAdapter):
 Register the adapter in `setup_plugin()`:
 
 ```python
-from chacc_outbound_src.adapters import MessagingAdapterRegistry, SMSMessagingAdapter
+from chacc_outbound_src.adapters import OutboundAdapterRegistry, SMSOutboundAdapter
 
-registry = MessagingAdapterRegistry()
+registry = OutboundAdapterRegistry()
 registry.register(
-    adapter=SMSMessagingAdapter(),
+    adapter=SMSOutboundAdapter(),
     channel="sms",
     name="twilio",
     set_default=True,
@@ -250,7 +231,7 @@ The service raises specific exceptions:
 from chacc_outbound_src.exceptions import AdapterNotFoundError
 
 try:
-    message = await messaging_service.send(...)
+    result = await outbound_service.send(...)
 except AdapterNotFoundError as e:
     # Handle missing adapter
 ```
@@ -263,16 +244,16 @@ except AdapterNotFoundError as e:
 flowchart TD
     subgraph chacc_outbound[chacc_outbound Module]
         REST[REST API - FastAPI /messaging/*]
-        PROG[Programmatic API - MessagingService]
+        PROG[Programmatic API - OutboundService]
         
-        subgraph Service[MessagingService]
+        subgraph Service[OutboundService]
             T1[Module mapping resolution]
             T2[Redis rate-limit check]
             T3[Create record -> flush DB]
             T4[Schedule async delivery]
         end
         
-        DB[(DB SQL - messages, mappings)]
+        DB[(DB SQL - outbounds, mappings)]
         REDIS[(Redis optional - rate limit counter)]
         TASK[asyncio task - delivery queue]
         DELIVER[_deliver_async - retry loop]
@@ -297,19 +278,19 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start([Caller Module / HTTP]) --> A[MessagingService.send]
+    Start([Caller Module / HTTP]) --> A[OutboundService.send]
     A --> B[Resolve channel param > default email]
     A --> C[Resolve adapter_name param > default console]
-    B --> D[Get ModuleMessagingMapping]
+    B --> D[Get OutboundModuleMapping]
     C --> D
     D --> E{Resolve rate_limit}
     E --> F{Redis available and rate_limit set?}
-    F -->|No| G[Create Messaging record status=PENDING]
+    F -->|No| G[Create Outbound record status=PENDING]
     F -->|Exceeded| Error1[Raise AdapterNotFoundError rate_limit_exceeded]
     F -->|Allowed| G
     G --> H[db.flush]
     H --> I[Schedule _deliver_async as background task]
-    I --> J[Return Messaging]
+    I --> J[Return serialized dict]
     J --> K[Caller db.commit]
     Error1 --> End
     K --> End
@@ -322,10 +303,10 @@ flowchart TD
     Start([Background Task _deliver_async]) --> A[Acquire DB session]
     A --> B{DB available?}
     B -->|No| End1([Return])
-    B -->|Yes| C[Reload Messaging by ID]
+    B -->|Yes| C[Reload Outbound by UUID]
     C --> D{Found?}
     D -->|No| End2([Return])
-    D -->|Yes| E[Get ModuleMessagingMapping]
+    D -->|Yes| E[Get OutboundModuleMapping]
     E --> F[Resolve max_retries overrides > mapping > 3]
     E --> G[Resolve backoff overrides > mapping > 300s]
     F --> H[Resolve effective adapter]
@@ -361,17 +342,17 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    M[Messaging]
-    MM[ModuleMessagingMapping]
-    S[MessagingStatus]
-    M -->|status| S
-    MM -->|module_name| M
+    O[Outbound]
+    M[OutboundModuleMapping]
+    S[OutboundStatus]
+    O -->|status| S
+    M -->|module_name| O
 ```
 
 ### Adapter Interface
 
 ```python
-class BaseMessagingAdapter:
+class BaseOutboundAdapter:
     name: str              # e.g. "console", "smtp", "twilio"
     channel: str           # e.g. "email", "sms"
 
@@ -401,7 +382,7 @@ plugins/chacc_outbound/
 │   ├── context_factory.py   # Context and service access helpers
 │   ├── models.py            # SQLAlchemy models
 │   ├── exceptions.py        # Custom exceptions
-│   ├── service.py           # Core messaging service
+│   ├── service.py           # Core outbound service
 │   ├── routes.py            # REST API routes
 │   ├── adapters/
 │   │   ├── __init__.py

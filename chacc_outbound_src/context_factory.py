@@ -35,5 +35,5 @@ async def get_db():
 def get_outbound_service():
     context = get_module_context()
     if context:
-        return context.get_service("messaging_service")
-    raise RuntimeError("Messaging service not initialized")
+        return context.get_service("outbound_service")
+    raise RuntimeError("Outbound service not initialized")

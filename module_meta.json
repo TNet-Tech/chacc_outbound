@@ -1,17 +1,17 @@
 {
   "name": "chacc_outbound",
-  "display_name": "Messaging Module",
+  "display_name": "Outbound Messaging Module",
   "version": "0.1.0",
   "author": "ChaCC API Team",
   "description": "A ChaCC module providing email and SMS messaging via adapters.",
   "entry_point": "chacc_outbound_src.main:setup_plugin",
   "test_entry_point": "chacc_outbound_src.tests.test_module:run_module_tests",
-  "base_path_prefix": "/messaging",
+  "base_path_prefix": "/outbound",
   "dependencies_file": "requirements.txt",
   "required_chacc_version": ">=1.0.0",
   "license": "MIT",
   "tags": [
-    "ChaCC Messaging"
+    "ChaCC Outbound Messaging"
   ],
   "homepage": "https://github.com/tnet-tech/chacc_outbound"
 }

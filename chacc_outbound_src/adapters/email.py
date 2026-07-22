@@ -17,7 +17,7 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
 
     async def send(
         self,
-        outbound_messaging_uuid: str,
+        messaging_uuid: str,
         recipient_id: str,
         recipient_contact: str,
         metadata: Optional[dict] = None,
@@ -44,7 +44,7 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
 
             return SendResult(
                 status="sent",
-                message_id=message_id,
+                message_id=outbound_message_uuid,
                 metadata={"recipient": recipient_contact},
             )
 
