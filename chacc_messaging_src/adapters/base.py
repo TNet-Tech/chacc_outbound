@@ -33,7 +33,7 @@ class BaseMessagingAdapter(ABC):
     @abstractmethod
     async def send(
         self,
-        messaging_id: str,
+        messaging_uuid: str,
         recipient_id: str,
         recipient_contact: str,
         metadata: Optional[dict] = None,

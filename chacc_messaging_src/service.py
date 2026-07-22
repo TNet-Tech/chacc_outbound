@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import select
 
@@ -39,7 +39,20 @@ class MessagingService:
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
     ) -> Messaging:
-        mapping = self._get_module_mapping(db, module_name)
+        """
+        Send a notification and enqueue async delivery.
+
+        Returns the created Messaging ORM instance. All internal async
+        delivery and status updates use uuid. The id column is kept for
+        internal DB operations only and is never exposed in API responses.
+
+        The returned object must be serialized before JSON response:
+            - str(message.uuid) for UUID
+            - message.status.value for enum
+            - message.sent_at.isoformat() if sent_at
+            - message.messaging_metadata for metadata
+        """
+        mapping = self.get_module_mapping(db, module_name)
         rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
         if rate_limit and self.redis:
             key = f"messaging:rate:{module_name}:{channel}"
@@ -49,22 +62,22 @@ class MessagingService:
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
 
-        notification = Messaging(
+        messaging_notification = Messaging(
             module_name=module_name,
             recipient_id=recipient_id,
             channel=channel,
             recipient_contact=recipient_contact,
             subject=subject,
             body=body,
-            notification_metadata=metadata,
+            messaging_metadata=metadata,
             status=MessagingStatus.PENDING,
         )
-        db.add(notification)
+        db.add(messaging_notification)
         db.flush()
 
         task = asyncio.create_task(
             self._deliver_async(
-                messaging_id=notification.id,
+                messaging_uuid=messaging_notification.uuid,
                 adapter_name=adapter_name,
                 overrides=overrides,
                 content_type=content_type,
@@ -73,11 +86,11 @@ class MessagingService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-        return notification
+        return messaging_notification
 
     async def _deliver_async(
         self,
-        messaging_id: int,
+        messaging_uuid: str,
         adapter_name: Optional[str] = None,
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
@@ -90,11 +103,13 @@ class MessagingService:
             else:
                 return
 
-            messaging = db.get(Messaging, messaging_id)
+            messaging = db.execute(
+                select(Messaging).where(Messaging.uuid == messaging_uuid)
+            ).scalar_one_or_none()
             if not messaging:
                 return
 
-            mapping = self._get_module_mapping(db, messaging.module_name)
+            mapping = self.get_module_mapping(db, messaging.module_name)
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
@@ -114,10 +129,10 @@ class MessagingService:
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await adapter.send(
-                        messaging_id=str(messaging.id),
+                        messaging_uuid=str(messaging.uuid),
                         recipient_id=messaging.recipient_id,
                         recipient_contact=messaging.recipient_contact,
-                        metadata=messaging.notification_metadata,
+                        metadata=messaging.messaging_metadata,
                         subject=messaging.subject,
                         body=messaging.body,
                         content_type=content_type,
@@ -125,7 +140,7 @@ class MessagingService:
 
                     if result.status == "sent":
                         messaging.status = MessagingStatus.SENT
-                        messaging.sent_at = datetime.utcnow()
+                        messaging.sent_at = datetime.now(timezone.utc)
                         messaging.attempts = attempt
                         if result.error_message:
                             messaging.last_error = result.error_message
@@ -160,7 +175,9 @@ class MessagingService:
         except Exception as e:
             if db:
                 try:
-                    messaging = db.get(Messaging, messaging_id)
+                    messaging = db.execute(
+                        select(Messaging).where(Messaging.uuid == messaging_uuid)
+                    ).scalar_one_or_none()
                     if messaging:
                         messaging.status = MessagingStatus.FAILED
                         messaging.last_error = str(e)

@@ -12,7 +12,7 @@ class MessagingStatus(str, Enum):
 
 
 class Messaging(ChaCCBaseModel):
-    __tablename__ = "notifications"
+    __tablename__ = "messaging"
 
     module_name = Column(String(100), nullable=False)
     recipient_id = Column(String(100), nullable=False)
@@ -22,7 +22,7 @@ class Messaging(ChaCCBaseModel):
     body = Column(Text, nullable=False)
     recipient_contact = Column(String(500), nullable=False)
 
-    notification_metadata = Column(JSON, nullable=True)
+    messaging_metadata = Column(JSON, nullable=True)
 
     status = Column(SQLAEnum(MessagingStatus), default=MessagingStatus.PENDING, nullable=False)
     sent_at = Column(DateTime, nullable=True)

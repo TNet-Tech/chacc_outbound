@@ -108,7 +108,7 @@ def test_console_adapter_send_direct():
     adapter = ConsoleMessagingAdapter()
     result = asyncio.run(
         adapter.send(
-            messaging_id="2",
+            messaging_uuid="test-uuid-1",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Direct subject",
@@ -117,7 +117,7 @@ def test_console_adapter_send_direct():
         )
     )
     assert result.status == "sent"
-    assert result.message_id == "console_2"
+    assert result.message_id == "console_test-uuid-1"
 
 
 def test_email_adapter_validate_contact():
@@ -130,7 +130,7 @@ def test_email_adapter_send_console_backend_html():
     adapter = EmailMessagingAdapter(smtp_config=None)
     result = asyncio.run(
         adapter.send(
-            messaging_id="3",
+            messaging_uuid="test-uuid-2",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Test",
@@ -146,7 +146,7 @@ def test_email_adapter_send_console_backend_text():
     adapter = EmailMessagingAdapter(smtp_config=None)
     result = asyncio.run(
         adapter.send(
-            messaging_id="4",
+            messaging_uuid="test-uuid-3",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Test",

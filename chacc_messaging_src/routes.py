@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .context_factory import get_db, get_module_context, get_messaging_service
@@ -35,7 +36,6 @@ class SendNotificationRequest(BaseModel):
 class MessagingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     uuid: str
     module_name: str
     recipient_id: str
@@ -50,6 +50,23 @@ class MessagingResponse(BaseModel):
     last_error: Optional[str]
 
 
+def _serialize_notification(n) -> MessagingResponse:
+    return MessagingResponse(
+        uuid=str(n.uuid),
+        module_name=n.module_name,
+        recipient_id=n.recipient_id,
+        channel=n.channel,
+        subject=n.subject,
+        body=n.body,
+        recipient_contact=n.recipient_contact,
+        notification_metadata=n.messaging_metadata,
+        status=n.status.value,
+        sent_at=n.sent_at.isoformat() if n.sent_at else None,
+        attempts=n.attempts,
+        last_error=n.last_error,
+    )
+
+
 @router.post("/send", response_model=MessagingResponse)
 async def send_notification(
     payload: SendNotificationRequest,
@@ -57,7 +74,7 @@ async def send_notification(
     db: Session = Depends(get_db),
 ):
     try:
-        notification = await service.send(
+        message = await service.send(
             db=db,
             recipient_id=payload.recipient_id,
             recipient_contact=payload.recipient_contact,
@@ -70,28 +87,14 @@ async def send_notification(
             content_type=payload.content_type,
         )
         db.commit()
-        return MessagingResponse(
-            id=notification.id,
-            uuid=notification.uuid,
-            module_name=notification.module_name,
-            recipient_id=notification.recipient_id,
-            channel=notification.channel,
-            subject=notification.subject,
-            body=notification.body,
-            recipient_contact=notification.recipient_contact,
-            notification_metadata=notification.notification_metadata,
-            status=notification.status.value,
-            sent_at=notification.sent_at.isoformat() if notification.sent_at else None,
-            attempts=notification.attempts,
-            last_error=notification.last_error,
-        )
+        return _serialize_notification(message)
     except AdapterNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/notifications", response_model=List[MessagingResponse])
+@router.get("/messages", response_model=List[MessagingResponse])
 async def list_notifications(
     module_name: Optional[str] = Query(None, description="Filter by module name"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
@@ -108,56 +111,25 @@ async def list_notifications(
         stmt = stmt.where(Messaging.status == status)
     stmt = stmt.order_by(Messaging.created_at.desc())
     result = db.execute(stmt)
-    notifications = result.scalars().all()
+    messaging_notifications = result.scalars().all()
 
-    return [
-        MessagingResponse(
-            id=n.id,
-            uuid=n.uuid,
-            module_name=n.module_name,
-            recipient_id=n.recipient_id,
-            channel=n.channel,
-            subject=n.subject,
-            body=n.body,
-            recipient_contact=n.recipient_contact,
-            notification_metadata=n.notification_metadata,
-            status=n.status.value,
-            sent_at=n.sent_at.isoformat() if n.sent_at else None,
-            attempts=n.attempts,
-            last_error=n.last_error,
-        )
-        for n in notifications
-    ]
+    return [_serialize_notification(n) for n in messaging_notifications]
 
 
-@router.get("/notifications/{notification_uuid}", response_model=MessagingResponse)
+@router.get("/messages/{notification_uuid}", response_model=MessagingResponse)
 async def get_notification(
     notification_uuid: str,
     service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),
 ):
-    notification = service.get_notification(db, notification_uuid)
+    notification = await service.get_notification(db, notification_uuid)
     if not notification:
         raise HTTPException(status_code=404, detail="Message not found")
-    return MessagingResponse(
-        id=notification.id,
-        uuid=notification.uuid,
-        module_name=notification.module_name,
-        recipient_id=notification.recipient_id,
-        channel=notification.channel,
-        subject=notification.subject,
-        body=notification.body,
-        recipient_contact=notification.recipient_contact,
-        notification_metadata=notification.notification_metadata,
-        status=notification.status.value,
-        sent_at=notification.sent_at.isoformat() if notification.sent_at else None,
-        attempts=notification.attempts,
-        last_error=notification.last_error,
-    )
+    return _serialize_notification(notification)
 
 
-@router.get("/notifications/{notification_uuid}/status")
-async def get_notification_status(
+@router.get("/messages/{notification_uuid}/status")
+async def get_message_status(
     notification_uuid: str,
     service: MessagingService = Depends(get_messaging_service),
     db: Session = Depends(get_db),

@@ -10,7 +10,7 @@ class ConsoleMessagingAdapter(BaseMessagingAdapter):
 
     async def send(
         self,
-        messaging_id: str,
+        messaging_uuid: str,
         recipient_id: str,
         recipient_contact: str,
         metadata: Optional[dict] = None,
@@ -22,18 +22,18 @@ class ConsoleMessagingAdapter(BaseMessagingAdapter):
         body = body or ""
 
         print(f"\n{'='*80}")
-        print(f"NOTIFICATION (Console Backend)")
-        print(f"{'='*80}")
-        print(f"Messaging ID: {messaging_id}")
+        print("")
+        print(f"Messaging UUID: {messaging_uuid}")
         print(f"Recipient: {recipient_contact}")
         print(f"Subject: {subject}")
         print(f"{'-'*80}")
         print(body)
+        print("")
         print(f"{'='*80}\n")
 
         return SendResult(
             status="sent",
-            message_id=f"console_{messaging_id}",
+            message_id=f"console_{messaging_uuid}",
         )
 
     async def validate_contact(self, contact: str) -> bool:
