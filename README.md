@@ -1,4 +1,4 @@
-# chacc_outbound
+# ChaCC Outbound
 
 A ChaCC module providing **email and SMS messaging** via adapters. Other modules send messages through a unified service API or REST endpoints without worrying about delivery mechanics.
 
