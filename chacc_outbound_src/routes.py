@@ -22,7 +22,7 @@ class SendOutboundRequest(BaseModel):
     subject: Optional[str] = Field(default=None, description="Message subject (required for email, ignored for SMS)")
     body: str = Field(..., description="Message body content")
     channel: str = Field(default="email", description="Channel to use")
-    adapter_name: Optional[str] = Field(default=None, description="Adapter to use; defaults to EMAIL_BACKEND env setting, then console")
+    adapter_name: Optional[str] = Field(default=None, description="Adapter to use; defaults to CHACC_OUTBOUND_EMAIL_BACKEND env setting, then console")
     content_type: str = Field(default="text/plain", description="Content type: text/plain for SMS/text, html for HTML email")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
 

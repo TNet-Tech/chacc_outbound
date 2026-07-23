@@ -16,7 +16,7 @@ health_router = APIRouter()
 async def health_check():
     context = get_module_context()
     config = get_outbound_config(context)
-    backend = config["EMAIL_BACKEND"]
+    backend = config["CHACC_OUTBOUND_EMAIL_BACKEND"]
 
     return {
         "status": "healthy",
@@ -33,18 +33,18 @@ def setup_plugin(context: Optional[BackboneContext] = None):
 
     config = get_outbound_config(_module_context)
 
-    email_backend = config["EMAIL_BACKEND"]
+    email_backend = config["CHACC_OUTBOUND_EMAIL_BACKEND"]
     adapter_name = email_backend
     if email_backend == "console":
         adapter = ConsoleOutboundAdapter()
     else:
         smtp_config = {
-            "host": config["EMAIL_SMTP_HOST"],
-            "port": config["EMAIL_SMTP_PORT"],
-            "username": config["EMAIL_SMTP_USERNAME"],
-            "password": config["EMAIL_SMTP_PASSWORD"],
-            "from_email": config["EMAIL_SMTP_FROM"],
-            "use_tls": config.get("EMAIL_SMTP_USE_TLS", False),
+            "host": config["CHACC_OUTBOUND_EMAIL_SMTP_HOST"],
+            "port": config["CHACC_OUTBOUND_EMAIL_SMTP_PORT"],
+            "username": config["CHACC_OUTBOUND_EMAIL_SMTP_USERNAME"],
+            "password": config["CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD"],
+            "from_email": config["CHACC_OUTBOUND_EMAIL_SMTP_FROM"],
+            "use_tls": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS", False),
         }
         adapter = EmailOutboundAdapter(smtp_config=smtp_config if smtp_config["host"] else None)
 

@@ -70,7 +70,7 @@ class OutboundService:
         db.flush()
         db.commit()
 
-        resolved_adapter_name = adapter_name or self.config.get("EMAIL_BACKEND") or "console"
+        resolved_adapter_name = adapter_name or "console"
 
         task = asyncio.create_task(
             self._deliver_async(
@@ -136,7 +136,7 @@ class OutboundService:
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
-            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else "console")
+            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else None) or "console"
             logger.info("Delivering outbound %s via adapter=%s retries=%s backoff=%s", messaging_uuid, effective_adapter_name, max_retries, backoff)
             try:
                 adapter = self.adapters.get(

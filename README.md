@@ -56,17 +56,81 @@ CHACC_OUTBOUND_EMAIL_SMTP_FROM=noreply@yourapp.com
 CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS=true
 ```
 
-### Per-module behavior
+### Module settings
 
-You can tune how each module's messages behave without changing code:
+Per-module behavior (retries, backoff, rate limits, default adapter, and default channel) is stored in the database using the `OutboundModuleMapping` model. This means you don't need environment variables for these — you configure them once in the database and they apply automatically to every message sent by that module.
 
-| Setting | What it controls | Default |
-|---------|-----------------|---------|
-| `max_retry_attempts` | How many times to retry a failed send | `3` |
-| `retry_backoff_seconds` | Initial wait between retries (doubles each time) | `300` (5 minutes) |
-| `rate_limit_per_minute` | Max sends per minute for this module | none |
-| `default_adapter_name` | Override the app-wide adapter for this module | app default |
-| `default_channel` | Default channel if not specified per send | `email` |
+#### Default values
+
+If no mapping exists for a module, the module uses these built-in defaults:
+
+| Setting | Default |
+|---------|---------|
+| `max_retry_attempts` | `3` |
+| `retry_backoff_seconds` | `300` (5 minutes) |
+| `rate_limit_per_minute` | none |
+| `default_adapter_name` | app-wide default (`console` in dev, `smtp` in production) |
+| `default_channel` | `email` |
+
+#### Creating or updating a mapping
+
+Use the programmatic API from any module, a script, or an admin route:
+
+```python
+from chacc_outbound_src.context_factory import get_outbound_service, get_db
+
+outbound_service = get_outbound_service()
+
+async for db in get_db():
+    mapping = outbound_service.create_or_update_module_mapping(
+        db=db,
+        module_name="order_service",
+        max_retry_attempts=5,
+        retry_backoff_seconds=60,
+        rate_limit_per_minute=20,
+        default_adapter_name="smtp",
+        default_channel="email",
+        description="Order notifications with aggressive retry",
+    )
+    await db.commit()
+```
+
+#### What each field means
+
+| Field | What it controls |
+|-------|-----------------|
+| `module_name` | The module this mapping applies to (e.g. `order_service`) |
+| `max_retry_attempts` | How many times to retry a failed send before giving up |
+| `retry_backoff_seconds` | Initial wait between retries. This doubles each attempt (60s → 120s → 240s...) |
+| `rate_limit_per_minute` | Maximum sends per minute for this module. Requires Redis to be enabled |
+| `default_adapter_name` | Override the app-wide adapter for this module |
+| `default_channel` | Default channel if not specified per send |
+| `is_active` | Set to `false` to pause all sends for this module |
+| `description` | Human-readable note for admins |
+
+#### Example configurations
+
+```python
+# Order service: retry fast, limit rate, use SMTP
+outbound_service.create_or_update_module_mapping(
+    db=db,
+    module_name="order_service",
+    max_retry_attempts=5,
+    retry_backoff_seconds=60,
+    rate_limit_per_minute=20,
+    default_adapter_name="smtp",
+    default_channel="email",
+)
+
+# Auth service: fewer retries, no rate limit
+outbound_service.create_or_update_module_mapping(
+    db=db,
+    module_name="auth_service",
+    max_retry_attempts=2,
+    retry_backoff_seconds=30,
+    default_channel="email",
+)
+```
 
 ## How it works
 
@@ -141,7 +205,7 @@ The `result` is a dictionary with the message UUID and current status. Since del
 | `recipient_contact` | Yes | Email address or phone number |
 | `subject` | For email | Ignored for SMS |
 | `body` | Yes | The message content |
-| `module_name` | Yes | Used for per-module settings and filtering |
+| `module_name` | Yes | Used for per-module settings (retries, backoff, rate limits) via `OutboundModuleMapping` |
 | `channel` | No | Defaults to `email` |
 | `adapter_name` | No | Override the default adapter for this send |
 | `content_type` | No | `text/plain` or `html` (for email) |
