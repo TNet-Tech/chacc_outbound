@@ -1,74 +1,117 @@
-# ChaCC Outbound
+# Chacc Outbound
 
-A ChaCC module providing **outbound messaging via adapters** (email, SMS, push, etc.). Other modules enqueue outbound messages through a unified service API or REST endpoints without worrying about delivery mechanics.
+Send emails, SMS, and other messages from any ChaCC module — with automatic retries, status tracking, and a clean admin API.
 
-## Features
+## What this module does
 
-- **Direct sends**: Send content directly with full control over subject, body, channel, and adapter
-- **Email (HTML/Text)**: SMTP adapter + console adapter for development
-- **SMS and more**: Extensible adapter pattern for SMS providers (Twilio, etc.)
-- **Retry & backoff**: Automatic retries with configurable backoff per module; config/adapter-not-found errors skip retries
-- **Async delivery**: Fire-and-forget with status tracking
-- **Programmatic API**: Other modules use `OutboundService` directly — no HTTP required
-- **REST API**: Admin endpoints for outbound records and sending
+Think of this as your app's **messaging helper**. Other modules say *"send this email to this customer"* and chacc_outbound handles:
 
-## Requirements
+- Choosing the right delivery method (SMTP, console for dev, etc.)
+- Saving the message record so you can track it
+- Retrying if delivery fails
+- Updating the status so you know what happened
 
-When using the `EmailOutboundAdapter` with a real SMTP backend, all of the following must be configured:
+You don't need to know SMTP, Twilio, or any provider details. Just call `send()` and the module figures out the rest.
 
-- `EMAIL_SMTP_HOST`
-- `EMAIL_SMTP_PORT`
-- `EMAIL_SMTP_USERNAME`
-- `EMAIL_SMTP_PASSWORD`
+## Before you start
 
-## Installation
-
-1. Ensure the module is available in your ChaCC plugins directory:
+Make sure this folder is inside your ChaCC plugins directory:
 
 ```
 plugins/chacc_outbound/
 ```
+> Dependencies will be taken care by `chacc-api`
 
-2. Install dependencies:
+## Settings
+
+Settings are shared across the whole app via environment variables. Pick the adapter that matches your environment.
+
+### Console (development)
+
+No extra setup needed. Messages are printed to the console instead of being sent anywhere. Great for testing.
 
 ```bash
-pip install -r plugins/chacc_outbound/requirements.txt
+CHACC_OUTBOUND_EMAIL_BACKEND=console
 ```
 
-## Configuration
+### SMTP (production email)
 
-The module reads configuration from the ChaCC module context. Set these keys for your module:
+| Setting | What it is | Example |
+|---------|-----------|---------|
+| `CHACC_OUTBOUND_EMAIL_BACKEND` | Use `smtp` for real email | `smtp` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_HOST` | Your mail server address | `smtp.mailprovider.com` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_PORT` | Usually `465` (SSL) or `587` (STARTTLS) | `465` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_USERNAME` | Login for your mail server | `alerts@yourapp.com` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD` | Password or app-specific password | `hunter2` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_FROM` | The "from" address on outgoing emails | `noreply@yourapp.com` |
+| `CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS` | Set `true` if your server needs explicit TLS | `true` |
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `EMAIL_BACKEND` | `console` | Active adapter name: `console` for dev, `smtp` for production |
-| `EMAIL_SMTP_HOST` | `""` | SMTP server host (required when `EMAIL_BACKEND=smtp`) |
-| `EMAIL_SMTP_PORT` | `587` | SMTP server port |
-| `EMAIL_SMTP_USERNAME` | `""` | SMTP authentication username (required when `EMAIL_BACKEND=smtp`) |
-| `EMAIL_SMTP_PASSWORD` | `""` | SMTP authentication password (required when `EMAIL_BACKEND=smtp`) |
-| `EMAIL_SMTP_FROM` | `noreply@example.com` | Default sender email address (required when `EMAIL_BACKEND=smtp`) |
-| `ENVIRONMENT` | `development` | Environment name |
-
-### Example: SMTP configuration
-
-```python
-# In your module's config or environment
-EMAIL_BACKEND=smtp
-EMAIL_SMTP_HOST=smtp.example.com
-EMAIL_SMTP_PORT=465
-EMAIL_SMTP_USERNAME=user@example.com
-EMAIL_SMTP_PASSWORD=your_password
-EMAIL_SMTP_FROM=alerts@yourapp.com
+```bash
+CHACC_OUTBOUND_EMAIL_BACKEND=smtp
+CHACC_OUTBOUND_EMAIL_SMTP_HOST=smtp.mailprovider.com
+CHACC_OUTBOUND_EMAIL_SMTP_PORT=465
+CHACC_OUTBOUND_EMAIL_SMTP_USERNAME=alerts@yourapp.com
+CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD=your_password
+CHACC_OUTBOUND_EMAIL_SMTP_FROM=noreply@yourapp.com
+CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS=true
 ```
 
-### Startup behavior
+### Per-module behavior
 
-- When `EMAIL_BACKEND=console`, the module registers a `ConsoleOutboundAdapter`.
-- When `EMAIL_BACKEND=smtp` but any required SMTP setting is missing/empty, the module still registers an `EmailOutboundAdapter`, but sending will fail with `AdapterConfigError` and the outbound record is marked `FAILED` without retries.
+You can tune how each module's messages behave without changing code:
 
-## Quick Start
+| Setting | What it controls | Default |
+|---------|-----------------|---------|
+| `max_retry_attempts` | How many times to retry a failed send | `3` |
+| `retry_backoff_seconds` | Initial wait between retries (doubles each time) | `300` (5 minutes) |
+| `rate_limit_per_minute` | Max sends per minute for this module | none |
+| `default_adapter_name` | Override the app-wide adapter for this module | app default |
+| `default_channel` | Default channel if not specified per send | `email` |
 
-### From another module (programmatic)
+## How it works
+
+### The big picture
+
+```mermaid
+flowchart TD
+    A[Any ChaCC Module] -->|"Please send this"| B[OutboundService.send]
+    B --> C{Save message as PENDING}
+    C --> D[Start background delivery task]
+    D --> E[Return immediately]
+    E --> F[Caller continues]
+
+    G[Background Task] --> H[Find the saved message]
+    H --> I{Adapter ready?}
+    I -->|No| J[Mark FAILED - no retry]
+    I -->|Yes| K[Try to deliver]
+    K --> L{Sent OK?}
+    L -->|Yes| M[Mark SENT]
+    L -->|No| N{Retries left?}
+    N -->|Yes| O[Mark RETRYING, wait, try again]
+    N -->|No| P[Mark FAILED]
+    O --> K
+```
+
+### The short version
+
+1. **You ask to send a message** — the module saves a `PENDING` record and returns immediately.
+2. **A background task picks it up** — it opens its own database connection and tries to deliver.
+3. **Success** — the record becomes `SENT`.
+4. **Temporary failure** — the record becomes `RETRYING`, waits, and tries again.
+5. **Permanent failure** — the record becomes `FAILED` and stops retrying.
+
+### Message life cycle
+
+```
+PENDING → SENT     (delivered successfully)
+PENDING → RETRYING → SENT     (succeeded after retry)
+PENDING → RETRYING → FAILED   (ran out of retries)
+PENDING → FAILED   (missing config, bad adapter, etc.)
+```
+
+## Using it from another module
+
+### Quick example
 
 ```python
 from chacc_outbound_src.context_factory import get_outbound_service, get_db
@@ -78,17 +121,36 @@ outbound_service = get_outbound_service()
 async for db in get_db():
     result = await outbound_service.send(
         db=db,
-        recipient_id=customer.id,
-        recipient_contact=customer.email,
+        recipient_id="cust_123",
+        recipient_contact="customer@example.com",
         subject="Your order has shipped",
-        body="Your order ORD-001 has been shipped. Tracking: TRK-456",
+        body="Your order ORD-001 has shipped. Tracking: TRK-456",
         module_name="order_service",
         channel="email",
     )
     await db.commit()
 ```
 
-### Via REST API
+The `result` is a dictionary with the message UUID and current status. Since delivery happens in the background, the status may still be `PENDING` at this point — it updates shortly after.
+
+### What each option means
+
+| Option | Required? | Notes |
+|--------|-----------|-------|
+| `recipient_id` | Yes | Your internal customer/order/user ID |
+| `recipient_contact` | Yes | Email address or phone number |
+| `subject` | For email | Ignored for SMS |
+| `body` | Yes | The message content |
+| `module_name` | Yes | Used for per-module settings and filtering |
+| `channel` | No | Defaults to `email` |
+| `adapter_name` | No | Override the default adapter for this send |
+| `content_type` | No | `text/plain` or `html` (for email) |
+
+## REST API
+
+Base path: `/outbound`
+
+### Send a message
 
 ```bash
 curl -X POST http://localhost:8085/outbound/send \
@@ -105,92 +167,121 @@ curl -X POST http://localhost:8085/outbound/send \
   }'
 ```
 
-## Sending Messages
+### List messages
 
-### Direct send (`send`)
+```bash
+# Basic list
+curl http://localhost:8085/outbound/messages
 
-```python
-# Email - text (default)
-result = await outbound_service.send(
-    db=db,
-    recipient_id="cust_123",
-    recipient_contact="customer@example.com",
-    subject="Urgent: Action required",
-    body="Please update your payment method.",
-    module_name="billing_service",
-    channel="email",
-    adapter_name="smtp",
-)
+# Filter
+curl "http://localhost:8085/outbound/messages?module_name=order_service&status=SENT"
 
-# Email - HTML
-result = await outbound_service.send(
-    db=db,
-    recipient_id="cust_123",
-    recipient_contact="customer@example.com",
-    subject="Order confirmation",
-    body="<h1>Order ORD-001 confirmed</h1><p>Thank you for your purchase.</p>",
-    module_name="order_service",
-    channel="email",
-    adapter_name="smtp",
-    content_type="html",
-)
+# Search
+curl "http://localhost:8085/outbound/messages?search=customer@example.com"
 
-# SMS (subject not used, content_type defaults to text/plain)
-result = await outbound_service.send(
-    db=db,
-    recipient_id="cust_123",
-    recipient_contact="+255712345678",
-    body="Your OTP is 123456",
-    module_name="auth_service",
-    channel="sms",
-    adapter_name="twilio",
-)
+# Paginated
+curl "http://localhost:8085/outbound/messages?page=1&size=20"
+
+# No pagination (return all)
+curl "http://localhost:8085/outbound/messages?paging=false"
 ```
 
-| Parameter | Email | SMS |
-|-----------|-------|-----|
-| `subject` | Required | Ignored |
-| `content_type` | `text/plain` (default) or `html` | Not required (defaults to `text/plain`) |
+| Query param | What it does |
+|-------------|-------------|
+| `page` | Page number, starting at 1 |
+| `size` | Results per page (1 to 1000) |
+| `paging` | Set `false` to return everything at once |
+| `module_name` | Filter by module |
+| `channel` | Filter by channel (`email`, `sms`, etc.) |
+| `status` | Filter by status (`PENDING`, `SENT`, `RETRYING`, `FAILED`) |
+| `search` | Search in UUID, module name, recipient contact, subject, and body |
 
-## Module Mapping
+Response shape:
 
-Define per-module defaults for adapter, channel, and retry policy via `OutboundModuleMapping`.
-
-```python
-mapping = outbound_service.create_or_update_module_mapping(
-    db=db,
-    module_name="order_service",
-    max_retry_attempts=5,
-    retry_backoff_seconds=60,
-    description="Order notifications with aggressive retry",
-)
-await db.commit()
+```json
+{
+  "success": true,
+  "message": "Data fetched successfully",
+  "data": [ ... ],
+  "total": 42,
+  "pager": {
+    "page": 1,
+    "size": 10,
+    "pages": 5
+  }
+}
 ```
 
-These defaults apply when a send call does not specify the corresponding parameter.
+### Get one message
 
-## REST API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/outbound/send` | Send message |
-| `GET` | `/outbound/messages` | List outbound records (filter: `module_name`, `channel`, `status`) |
-| `GET` | `/outbound/messages/{uuid}` | Get outbound record by UUID |
-| `GET` | `/outbound/messages/{uuid}/status` | Get outbound status by UUID |
-
-## Retrieving Messages
-
-```python
-# Get by UUID
-outbound = outbound_service.get_message(db, outbound_uuid)
-
-# Get status only
-status = outbound_service.get_status(db, outbound_uuid)
+```bash
+curl http://localhost:8085/outbound/messages/019f90bf-a50b-7d13-8937-f6e98cabc71e
 ```
 
-## Custom Adapters
+### Check status only
 
-Implement `BaseOutboundAdapter` to add new channels (SMS, push, etc.).
+```bash
+curl http://localhost:8085/outbound/messages/019f90bf-a50b-7d13-8937-f6e98cabc71e/status
+```
+
+Returns:
+
+```json
+{
+  "uuid": "019f90bf-a50b-7d13-8937-f6e98cabc71e",
+  "status": "SENT"
+}
+```
+
+## Message statuses
+
+| Status | Meaning |
+|--------|---------|
+| `PENDING` | Message was saved and is waiting to be delivered |
+| `SENT` | Delivered successfully |
+| `RETRYING` | Delivery failed, will try again |
+| `FAILED` | Gave up. Check `last_error` for why |
+
+## Debugging
+
+### Nothing is being sent
+
+1. Check the logs for `Adapter reported SENT` — if you see this, the adapter delivered successfully.
+2. If you see `Adapter reported FAILED`, the adapter itself is failing. Check its config.
+3. If you see `Adapter not found`, the adapter name is wrong or not registered.
+
+### Status stays PENDING forever
+
+1. Look for `Outbound delivery failed for <uuid>` — the background task crashed.
+2. Look for `Background delivery task failed for <uuid>` — an unhandled exception killed the task.
+3. If you see neither, the background task may not be starting. Check that the app is running and `module_context` is set.
+
+### Emails send but DB doesn't update
+
+This was a known issue caused by the database session closing before the status update. It has been fixed. If you still see it:
+
+1. Check that your app is using the latest code.
+2. Look for `marked as SENT in DB` in the logs — if you see this but the status is still `PENDING` when you query, the session may still be closing early.
+3. Make sure `module_context.get_db()` is yielding a stable session for the full request lifecycle.
+
+### Retry behavior looks wrong
+
+- `AdapterConfigError` and `AdapterNotFoundError` **do not retry** — they mark the message `FAILED` immediately.
+- SMTP connection errors **do retry** — the message goes to `RETRYING` and waits before trying again.
+- Authentication errors and bad recipient addresses **do not retry** — they mark the message `FAILED`.
+
+### Common config mistakes
+
+| Symptom | Likely cause |
+|---------|-------------|
+| `AdapterConfigError` | `EMAIL_SMTP_HOST` is empty or wrong |
+| `SMTPAuthenticationError` | Wrong username/password |
+| `SMTPSenderRefused` | `EMAIL_SMTP_FROM` address is not allowed by your mail server |
+| `SMTPServerDisconnected` | Firewall, wrong port, or server down |
+
+## Extending with custom adapters
+
+Want to send SMS, push notifications, or something else? Create an adapter:
 
 ```python
 from chacc_outbound_src.adapters.base import BaseOutboundAdapter, SendResult
@@ -199,89 +290,50 @@ class SMSOutboundAdapter(BaseOutboundAdapter):
     name = "twilio"
     channel = "sms"
 
-    async def send(
-        self,
-        messaging_uuid: str,
-        recipient_id: str,
-        recipient_contact: str,
-        metadata: Optional[dict] = None,
-        subject: Optional[str] = None,
-        body: Optional[str] = None,
-        content_type: str = "text/plain",
-    ) -> SendResult:
-        message = client.messages.create(
-            body=body or "",
-            from_="+1234567890",
-            to=recipient_contact,
-        )
-        return SendResult(status="sent", message_id=message.sid)
+    async def send(self, messaging_uuid, recipient_id, recipient_contact, metadata=None, subject=None, body=None, content_type="text/plain"):
+        # Your delivery logic here
+        return SendResult(status="sent", message_id="twilio_123")
 
-    async def validate_contact(self, contact: str) -> bool:
+    async def validate_contact(self, contact):
         return contact.startswith("+")
 ```
 
-Register the adapter in `setup_plugin()`:
+Register it in `setup_plugin()`:
 
 ```python
 from chacc_outbound_src.adapters import OutboundAdapterRegistry, SMSOutboundAdapter
 
 registry = OutboundAdapterRegistry()
-registry.register(
-    adapter=SMSOutboundAdapter(),
-    channel="sms",
-    name="twilio",
-    set_default=True,
-)
-```
-
-## Error Handling
-
-The service raises specific exceptions:
-
-- `AdapterNotFoundError` — no adapter registered for the channel
-- `AdapterConfigError` — adapter is registered but missing required configuration
-
-```python
-from chacc_outbound_src.exceptions import AdapterNotFoundError, AdapterConfigError
-
-try:
-    result = await outbound_service.send(...)
-except AdapterNotFoundError as e:
-    # Handle missing adapter
-except AdapterConfigError as e:
-    # Handle missing/broken adapter configuration; outbound is already marked FAILED
+registry.register(adapter=SMSOutboundAdapter(), channel="sms", name="twilio", set_default=True)
 ```
 
 ## Architecture
 
-### Component Overview
+### Components
 
 ```mermaid
 flowchart TD
     subgraph chacc_outbound[chacc_outbound Module]
-        REST[REST API - FastAPI /outbound/*]
+        REST[REST API - /outbound/*]
         PROG[Programmatic API - OutboundService]
-        
+
         subgraph Service[OutboundService]
-            T1[Module mapping resolution]
-            T2[Redis rate-limit check]
-            T3[Create record -> flush DB]
+            T1[Resolve module mapping]
+            T2[Rate limit check via Redis]
+            T3[Create PENDING record]
             T4[Schedule async delivery]
         end
-        
-        DB[(DB SQL - outbounds, mappings)]
-        REDIS[(Redis optional - rate limit counter)]
-        TASK[asyncio task - delivery queue]
-        DELIVER[_deliver_async - retry loop]
-        
-        CONSOLE[Console Adapter - dev/staging]
-        EMAIL[Email Adapter - SMTP
-Fail-fast:
-- missing adapter -> FAILED
-- missing adapter config -> FAILED]
-        CUSTOM[Custom Adapters - SMS, push]
+
+        DB[(Database)]
+        REDIS[(Redis - rate limits)]
+        TASK[Background Task]
+        DELIVER[Delivery + retry loop]
+
+        CONSOLE[Console Adapter]
+        EMAIL[Email Adapter - SMTP]
+        CUSTOM[Your Custom Adapters]
     end
-    
+
     REST --> Service
     PROG --> Service
     Service --> DB
@@ -293,140 +345,61 @@ Fail-fast:
     DELIVER --> CUSTOM
 ```
 
-### Message Flow: Direct Send (`send()`)
+### Send flow
 
 ```mermaid
 flowchart TD
-    Start([Caller Module / HTTP]) --> A[OutboundService.send]
-    A --> B[Resolve channel param > default email]
-    A --> C[Resolve adapter_name param > default console]
-    B --> D[Get OutboundModuleMapping]
-    C --> D
-    D --> E{Resolve rate_limit}
-    E --> F{Redis available and rate_limit set?}
-    F -->|No| G[Create Outbound record status=PENDING]
-    F -->|Exceeded| Error1[Raise AdapterNotFoundError rate_limit_exceeded]
-    F -->|Allowed| G
-    G --> H[db.flush]
-    H --> I[Schedule _deliver_async as background task]
-    I --> J[Return serialized dict]
-    J --> K[Caller db.commit]
+    Start([Caller]) --> A[OutboundService.send]
+    A --> B{Rate limit check}
+    B -->|Exceeded| Error1[Raise rate_limit_exceeded]
+    B -->|OK| C[Create PENDING record]
+    C --> D[db.commit]
+    D --> E[Schedule background task]
+    E --> F[Return to caller]
     Error1 --> End
-    K --> End
+    F --> End
 ```
 
-### Async Delivery Flow (`_deliver_async()`)
+### Delivery flow
 
 ```mermaid
 flowchart TD
-    Start([Background Task _deliver_async]) --> A[Acquire DB session]
-    A --> B{DB available?}
-    B -->|No| End1([Return])
-    B -->|Yes| C[Reload Outbound by UUID]
+    Start([Background Task]) --> A[Open DB session]
+    A --> B{Session available?}
+    B -->|No| End1([Log warning, exit])
+    B -->|Yes| C[Load message by UUID]
     C --> D{Found?}
-    D -->|No| End2([Return])
-    D -->|Yes| E[Get OutboundModuleMapping]
-    E --> F[Resolve max_retries overrides > mapping > 3]
-    E --> G[Resolve backoff overrides > mapping > 300s]
-    F --> H[Resolve effective adapter]
-    G --> H
-    H --> I{Adapter registered?}
-    I -->|No| Error1[Raise AdapterNotFoundError]
-    I -->|Yes| J[Retry loop attempt 1..max_retries]
-    J --> K[adapter.send]
-    K --> L{result.status == sent?}
-    L -->|Yes| M[status=SENT sent_at=now commit]
-    M --> End3([Return])
-    L -->|No| N[status=RETRYING last_error=msg commit]
-    N --> O{attempt < max_retries?}
-    O -->|Yes| P[sleep backoff backoff *= 2]
-    P --> J
-    O -->|No| Q[status=FAILED last_error=last_error commit]
-    Q --> End4([Return])
-    Error1 --> End5([Return])
-    K --> AdapterConfigError1[AdapterConfigError]
-    AdapterConfigError1 --> Error2[status=FAILED last_error=reason commit]
-    Error2 --> End6([Return])
+    D -->|No| End2([Log warning, exit])
+    D -->|Yes| E[Load module mapping]
+    E --> F{Resolve adapter}
+    F -->|Not found| G[Mark FAILED, exit]
+    F -->|Found| H[Retry loop]
+    H --> I[Call adapter.send]
+    I --> J{Sent?}
+    J -->|Yes| K[Mark SENT, commit, exit]
+    J -->|No| L{Adapter said failed?}
+    L -->|Yes| M[Mark FAILED, commit, exit]
+    L -->|No| N[Mark RETRYING, commit]
+    N --> O{Retries left?}
+    O -->|Yes| P[Wait, double backoff]
+    P --> H
+    O -->|No| Q[Mark FAILED, exit]
+    G --> End3
+    K --> End3
+    M --> End3
+    Q --> End3
 ```
 
-### Override Resolution
-
-```mermaid
-flowchart LR
-    A[_apply_overrides] --> B{key in overrides?}
-    B -->|Yes| C[Return overrides.key per-call]
-    B -->|No| D{mapping exists and key not None?}
-    D -->|Yes| E[Return mapping.key per-module]
-    D -->|No| F[Return default hard-coded]
-```
-
-### Data Model Relationships
-
-```mermaid
-flowchart TD
-    O[Outbound]
-    M[OutboundModuleMapping]
-    S[OutboundStatus]
-    O -->|status| S
-    M -->|module_name| O
-```
-
-### Adapter Interface
-
-```python
-class BaseOutboundAdapter:
-    name: str              # e.g. "console", "smtp", "twilio"
-    channel: str           # e.g. "email", "sms"
-
-    async def send(
-        messaging_uuid: str,
-        recipient_id: str,
-        recipient_contact: str,
-        metadata: Optional[dict] = None,
-        subject: Optional[str] = None,
-        body: Optional[str] = None,
-        content_type: str = "text/plain",
-    ) -> SendResult
-
-    async def validate_contact(self, contact: str) -> bool
-```
-
-## Running Tests
+## Running tests
 
 ```bash
 pytest plugins/chacc_outbound/chacc_outbound_src/tests/ -v
 ```
 
-Or using the standalone runner:
+Or:
 
 ```bash
 python plugins/chacc_outbound/chacc_outbound_src/run_tests.py
-```
-
-## Project Structure
-
-```
-plugins/chacc_outbound/
-├── chacc_outbound_src/
-│   ├── main.py              # Plugin entry point
-│   ├── config.py            # Configuration loader
-│   ├── context_factory.py   # Context and service access helpers
-│   ├── models.py            # SQLAlchemy models
-│   ├── exceptions.py        # Custom exceptions
-│   ├── service.py           # Core outbound service
-│   ├── routes.py            # REST API routes
-│   ├── adapters/
-│   │   ├── __init__.py
-│   │   ├── base.py          # Abstract adapter base
-│   │   ├── email.py         # SMTP email adapter
-│   │   └── console.py       # Console adapter for dev
-│   ├── tests/
-│   │   ├── __init__.py
-│   │   └── test_module.py
-│   └── run_tests.py
-├── module_meta.json
-├── requirements.txt
-└── README.md
 ```
 
 ## License
