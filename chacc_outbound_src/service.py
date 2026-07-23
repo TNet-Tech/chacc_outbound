@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from .models import Outbound, OutboundModuleMapping, OutboundStatus
 from .adapters import OutboundAdapterRegistry
-from .exceptions import AdapterConfigError, AdapterNotFoundError
+from .exceptions import RETRYABLE_EXCEPTIONS, NON_RETRYABLE_EXCEPTIONS, AdapterConfigError, AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class OutboundService:
         module_name: str,
         subject: Optional[str] = None,
         channel: str = "email",
-        adapter_name: str = "console",
+        adapter_name: Optional[str] = None,
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
@@ -64,20 +64,30 @@ class OutboundService:
             body=body,
             messaging_metadata=metadata,
             status=OutboundStatus.PENDING,
+            attempts=0,
         )
         db.add(outbound_message)
         db.flush()
+        db.commit()
+
+        resolved_adapter_name = adapter_name or self.config.get("EMAIL_BACKEND") or "console"
 
         task = asyncio.create_task(
             self._deliver_async(
                 messaging_uuid=outbound_message.uuid,
-                adapter_name=adapter_name,
+                adapter_name=resolved_adapter_name,
                 overrides=overrides,
                 content_type=content_type,
             )
         )
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+
+        def _on_task_done(t):
+            self._tasks.discard(t)
+            if t.exception():
+                logger.error("Background delivery task failed for %s: %s", outbound_message.uuid, t.exception(), exc_info=t.exception())
+
+        task.add_done_callback(_on_task_done)
 
         return self._serialize_outbound(outbound_message)
 
@@ -106,29 +116,35 @@ class OutboundService:
     ) -> None:
         context = self.module_context
         db = None
+        db_gen = None
         try:
             if context:
-                db = await context.get_db().__anext__()
+                db_gen = context.get_db()
+                db = await db_gen.__anext__()
             else:
+                logger.warning("No module_context available; cannot deliver outbound message %s", messaging_uuid)
                 return
 
             messaging = db.execute(
                 select(Outbound).where(Outbound.uuid == messaging_uuid)
             ).scalar_one_or_none()
             if not messaging:
+                logger.warning("Outbound message %s not found in database", messaging_uuid)
                 return
 
             mapping = self.get_module_mapping(db, messaging.module_name)
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
-            effective_adapter_name = adapter_name or mapping.default_adapter_name if mapping else "console"
+            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else "console")
+            logger.info("Delivering outbound %s via adapter=%s retries=%s backoff=%s", messaging_uuid, effective_adapter_name, max_retries, backoff)
             try:
                 adapter = self.adapters.get(
                     channel=messaging.channel,
                     adapter_name=effective_adapter_name,
                 )
             except AdapterNotFoundError as e:
+                logger.error("Adapter not found for outbound %s: %s", messaging_uuid, e)
                 messaging.status = OutboundStatus.FAILED
                 messaging.last_error = str(e)
                 db.flush()
@@ -149,6 +165,7 @@ class OutboundService:
                     )
 
                     if result.status == "sent":
+                        logger.info("Adapter reported SENT for outbound %s", messaging_uuid)
                         messaging.status = OutboundStatus.SENT
                         messaging.sent_at = datetime.now(timezone.utc)
                         messaging.attempts = attempt
@@ -156,6 +173,17 @@ class OutboundService:
                             messaging.last_error = result.error_message
                         db.flush()
                         db.commit()
+                        logger.info("Outbound %s marked as SENT in DB", messaging_uuid)
+                        return
+
+                    if result.status == "failed":
+                        logger.warning("Adapter reported FAILED for outbound %s: %s", messaging_uuid, result.error_message)
+                        messaging.status = OutboundStatus.FAILED
+                        messaging.last_error = result.error_message or "Adapter reported failure"
+                        messaging.attempts = attempt
+                        db.flush()
+                        db.commit()
+                        logger.info("Outbound %s marked as FAILED in DB", messaging_uuid)
                         return
 
                     last_error = result.error_message or "Unknown error"
@@ -170,6 +198,7 @@ class OutboundService:
                         backoff = backoff * 2
 
                 except AdapterConfigError as e:
+                    logger.error("Adapter config error for outbound %s: %s", messaging_uuid, e)
                     messaging.status = OutboundStatus.FAILED
                     messaging.last_error = str(e)
                     messaging.attempts = attempt
@@ -177,8 +206,9 @@ class OutboundService:
                     db.commit()
                     return
 
-                except Exception as e:
+                except RETRYABLE_EXCEPTIONS as e:
                     last_error = str(e)
+                    logger.warning("Retryable error for outbound %s (attempt %s): %s", messaging_uuid, attempt, e)
                     messaging.status = OutboundStatus.RETRYING
                     messaging.last_error = last_error
                     messaging.attempts = attempt
@@ -189,12 +219,23 @@ class OutboundService:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
 
+                except NON_RETRYABLE_EXCEPTIONS as e:
+                    logger.error("Non-retryable error for outbound %s: %s", messaging_uuid, e)
+                    messaging.status = OutboundStatus.FAILED
+                    messaging.last_error = str(e)
+                    messaging.attempts = attempt
+                    db.flush()
+                    db.commit()
+                    return
+
+            logger.warning("Outbound %s failed after %s retries", messaging_uuid, max_retries)
             messaging.status = OutboundStatus.FAILED
             messaging.last_error = last_error or "Max retries exceeded"
             db.flush()
             db.commit()
 
         except Exception as e:
+            logger.error("Outbound delivery failed for %s: %s", messaging_uuid, e, exc_info=True)
             if db:
                 try:
                     messaging = db.execute(
@@ -205,9 +246,14 @@ class OutboundService:
                         messaging.last_error = str(e)
                         db.flush()
                         db.commit()
+                except Exception as inner_e:
+                    logger.error("Failed to mark outbound %s as FAILED: %s", messaging_uuid, inner_e, exc_info=True)
+        finally:
+            if db_gen is not None:
+                try:
+                    await db_gen.aclose()
                 except Exception:
                     pass
-        finally:
             if db:
                 try:
                     db.close()

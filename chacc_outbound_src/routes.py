@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from typing import Optional, List, Dict, Any
-from sqlalchemy import select
+from typing import Optional, List, Dict, Any, Generic, TypeVar
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
 from .context_factory import get_db, get_outbound_service
@@ -12,6 +12,8 @@ from .exceptions import AdapterNotFoundError
 
 router = APIRouter()
 
+T = TypeVar("T")
+
 
 class SendOutboundRequest(BaseModel):
     module_name: str = Field(..., description="Module name sending the notification")
@@ -20,7 +22,7 @@ class SendOutboundRequest(BaseModel):
     subject: Optional[str] = Field(default=None, description="Message subject (required for email, ignored for SMS)")
     body: str = Field(..., description="Message body content")
     channel: str = Field(default="email", description="Channel to use")
-    adapter_name: str = Field(default="console", description="Adapter to use")
+    adapter_name: Optional[str] = Field(default=None, description="Adapter to use; defaults to EMAIL_BACKEND env setting, then console")
     content_type: str = Field(default="text/plain", description="Content type: text/plain for SMS/text, html for HTML email")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
 
@@ -47,6 +49,29 @@ class OutboundResponse(BaseModel):
     sent_at: Optional[str]
     attempts: int
     last_error: Optional[str]
+
+
+class Pager(BaseModel):
+    page: int
+    size: int
+    pages: int
+
+
+class BaseResponseModel(BaseModel, Generic[T]):
+    success: bool = True
+    message: str = ""
+    data: List[T]
+    total: Optional[int] = None
+    pager: Optional[Pager] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PaginationParams(BaseModel):
+    paging: bool = Field(True, description="Whether to use pagination")
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    size: int = Field(10, ge=1, le=1000, description="Page size")
 
 
 def _serialize_outbound(n) -> OutboundResponse:
@@ -91,11 +116,13 @@ async def send_outbound(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/messages", response_model=List[OutboundResponse])
+@router.get("/messages", response_model=BaseResponseModel[OutboundResponse])
 async def list_outbounds(
+    params: PaginationParams = Depends(),
     module_name: Optional[str] = Query(None, description="Filter by module name"),
     channel: Optional[str] = Query(None, description="Filter by channel"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    search: str = Query("", description="Search by uuid, module_name, recipient_contact, subject, or body"),
     service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
 ):
@@ -106,11 +133,42 @@ async def list_outbounds(
         stmt = stmt.where(Outbound.channel == channel)
     if status:
         stmt = stmt.where(Outbound.status == status)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                Outbound.uuid.ilike(like),
+                Outbound.module_name.ilike(like),
+                Outbound.recipient_contact.ilike(like),
+                Outbound.subject.ilike(like),
+                Outbound.body.ilike(like),
+            )
+        )
     stmt = stmt.order_by(Outbound.created_at.desc())
-    result = db.execute(stmt)
-    messaging_notifications = result.scalars().all()
 
-    return [_serialize_outbound(n) for n in messaging_notifications]
+    if not params.paging:
+        result = db.execute(stmt)
+        items = result.scalars().all()
+        return BaseResponseModel(
+            success=True,
+            message="Data fetched successfully",
+            data=[_serialize_outbound(n) for n in items],
+            total=None,
+            pager=None,
+        )
+
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+    paginated = db.execute(stmt.offset((params.page - 1) * params.size).limit(params.size))
+    items = paginated.scalars().all()
+    pages = (total + params.size - 1) // params.size if params.size else 1
+
+    return BaseResponseModel(
+        success=True,
+        message="Data fetched successfully",
+        data=[_serialize_outbound(n) for n in items],
+        total=total,
+        pager=Pager(page=params.page, size=params.size, pages=pages),
+    )
 
 
 @router.get("/messages/{outbound_uuid}", response_model=OutboundResponse)

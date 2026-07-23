@@ -1,5 +1,5 @@
 import re
-import smtplib
+import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
@@ -32,10 +32,7 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
             )
 
         if not await self.validate_contact(recipient_contact):
-            return SendResult(
-                status="failed",
-                error_message="Invalid email address",
-            )
+            raise ValueError("Invalid email address")
 
         subject = subject or ""
         body = body or ""
@@ -78,28 +75,34 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
             msg["From"] = self.smtp_config.get("from_email", "noreply@example.com")
             msg["To"] = to
 
-        with smtplib.SMTP(
-            self.smtp_config["host"],
-            self.smtp_config["port"],
-        ) as server:
+        smtp = aiosmtplib.SMTP(
+            hostname=self.smtp_config["host"],
+            port=self.smtp_config["port"],
+            timeout=10,
+            use_tls=self.smtp_config.get("use_tls", False),
+        )
+        async with smtp:
             if self.smtp_config.get("username") and self.smtp_config.get("password"):
-                server.starttls()
-                server.login(
+                if not self.smtp_config.get("use_tls", False):
+                    await smtp.starttls()
+                await smtp.login(
                     self.smtp_config["username"],
                     self.smtp_config["password"],
                 )
-            server.send_message(msg)
+            await smtp.send_message(msg)
 
     async def health_check(self) -> bool:
         if not self.smtp_config:
             return False
         try:
-            with smtplib.SMTP(
-                self.smtp_config["host"],
-                self.smtp_config["port"],
+            smtp = aiosmtplib.SMTP(
+                hostname=self.smtp_config["host"],
+                port=self.smtp_config["port"],
                 timeout=5,
-            ) as server:
-                server.ehlo()
+                use_tls=self.smtp_config.get("use_tls", False),
+            )
+            async with smtp:
+                await smtp.connect()
             return True
         except Exception:
             return False

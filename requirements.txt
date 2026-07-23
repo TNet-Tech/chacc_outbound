@@ -1,1 +1,1 @@
-# Runtime dependencies are provided by chacc_api
+aiosmtplib>=2.0.0

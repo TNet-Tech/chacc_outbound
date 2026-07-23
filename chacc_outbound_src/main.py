@@ -44,6 +44,7 @@ def setup_plugin(context: Optional[BackboneContext] = None):
             "username": config["EMAIL_SMTP_USERNAME"],
             "password": config["EMAIL_SMTP_PASSWORD"],
             "from_email": config["EMAIL_SMTP_FROM"],
+            "use_tls": config.get("EMAIL_SMTP_USE_TLS", False),
         }
         adapter = EmailOutboundAdapter(smtp_config=smtp_config if smtp_config["host"] else None)
 
