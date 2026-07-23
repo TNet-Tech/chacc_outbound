@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from .models import Outbound, OutboundModuleMapping, OutboundStatus
 from .adapters import OutboundAdapterRegistry
-from .exceptions import AdapterNotFoundError
+from .exceptions import AdapterConfigError, AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,7 @@ class OutboundService:
                 messaging.status = OutboundStatus.FAILED
                 messaging.last_error = str(e)
                 db.flush()
+                db.commit()
                 return
 
             last_error = None
@@ -154,6 +155,7 @@ class OutboundService:
                         if result.error_message:
                             messaging.last_error = result.error_message
                         db.flush()
+                        db.commit()
                         return
 
                     last_error = result.error_message or "Unknown error"
@@ -161,10 +163,19 @@ class OutboundService:
                     messaging.last_error = last_error
                     messaging.attempts = attempt
                     db.flush()
+                    db.commit()
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
+
+                except AdapterConfigError as e:
+                    messaging.status = OutboundStatus.FAILED
+                    messaging.last_error = str(e)
+                    messaging.attempts = attempt
+                    db.flush()
+                    db.commit()
+                    return
 
                 except Exception as e:
                     last_error = str(e)
@@ -172,6 +183,7 @@ class OutboundService:
                     messaging.last_error = last_error
                     messaging.attempts = attempt
                     db.flush()
+                    db.commit()
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
@@ -180,6 +192,7 @@ class OutboundService:
             messaging.status = OutboundStatus.FAILED
             messaging.last_error = last_error or "Max retries exceeded"
             db.flush()
+            db.commit()
 
         except Exception as e:
             if db:
@@ -191,6 +204,7 @@ class OutboundService:
                         messaging.status = OutboundStatus.FAILED
                         messaging.last_error = str(e)
                         db.flush()
+                        db.commit()
                 except Exception:
                     pass
         finally:
@@ -219,10 +233,13 @@ class OutboundService:
         )
         return result.scalar_one_or_none()
 
-    def get_status(self, db, outbound_messaging_uuid: str) -> Optional[OutboundStatus]:
+    def get_status(self, db, outbound_messaging_uuid: str) -> Optional[str]:
         message = self.get_message(db, outbound_messaging_uuid)
         if message:
-            return message.status
+            status = message.status
+            if hasattr(status, "value"):
+                return status.value
+            return str(status)
         return None
 
     def get_module_mapping(self, db, module_name: str) -> Optional[OutboundModuleMapping]:

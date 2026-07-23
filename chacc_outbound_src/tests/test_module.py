@@ -7,7 +7,7 @@ import sys
 import os
 
 from ..models import Outbound, OutboundModuleMapping, OutboundStatus
-from ..exceptions import AdapterNotFoundError
+from ..exceptions import AdapterConfigError, AdapterNotFoundError
 from ..config import get_outbound_config
 from ..adapters import ConsoleOutboundAdapter, EmailOutboundAdapter, OutboundAdapterRegistry
 
@@ -108,7 +108,7 @@ def test_console_adapter_send_direct():
     adapter = ConsoleOutboundAdapter()
     result = asyncio.run(
         adapter.send(
-            outbound_messaging_uuid="test-uuid-1",
+            messaging_uuid="test-uuid-1",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Direct subject",
@@ -126,27 +126,53 @@ def test_email_adapter_validate_contact():
     assert asyncio.run(adapter.validate_contact("invalid")) is False
 
 
-def test_email_adapter_send_console_backend_html():
+def test_email_adapter_send_requires_smtp_config():
     adapter = EmailOutboundAdapter(smtp_config=None)
+    with pytest.raises(AdapterConfigError, match="SMTP configuration is missing"):
+        asyncio.run(
+            adapter.send(
+                messaging_uuid="test-uuid-2",
+                recipient_id="user_123",
+                recipient_contact="user@example.com",
+                subject="Test",
+                body="<h1>Hello</h1>",
+                content_type="html",
+            )
+        )
+
+
+def test_email_adapter_send_invalid_contact():
+    adapter = EmailOutboundAdapter(smtp_config={"host": "smtp.example.com", "port": 587})
     result = asyncio.run(
         adapter.send(
-            outbound_messaging_uuid="test-uuid-2",
+            messaging_uuid="test-uuid-3",
             recipient_id="user_123",
-            recipient_contact="user@example.com",
+            recipient_contact="invalid",
             subject="Test",
-            body="<h1>Hello</h1>",
-            content_type="html",
+            body="Plain text",
+            content_type="text/plain",
         )
     )
-    assert result.status == "sent"
-    assert result.message_id.startswith("console_")
+    assert result.status == "failed"
+    assert result.error_message == "Invalid email address"
 
 
-def test_email_adapter_send_console_backend_text():
-    adapter = EmailOutboundAdapter(smtp_config=None)
+def test_email_adapter_send_smtp():
+    adapter = EmailOutboundAdapter(
+        smtp_config={
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_email": "alerts@example.com",
+        }
+    )
+    async def _mock_send_email(**kwargs):
+        return None
+    adapter._send_email = _mock_send_email
     result = asyncio.run(
         adapter.send(
-            outbound_messaging_uuid="test-uuid-3",
+            messaging_uuid="test-uuid-4",
             recipient_id="user_123",
             recipient_contact="user@example.com",
             subject="Test",
@@ -155,7 +181,7 @@ def test_email_adapter_send_console_backend_text():
         )
     )
     assert result.status == "sent"
-    assert result.message_id.startswith("console_")
+    assert result.message_id == "smtp_test-uuid-4"
 
 
 def test_messaging_adapter_registry_register_and_get():
@@ -279,11 +305,11 @@ def test_service_get_status_returns_status():
 
     mock_db = MagicMock()
     mock_notification = MagicMock()
-    mock_notification.status = OutboundStatus.SENT
+    mock_notification.status = "SENT"
     mock_db.execute.return_value.scalar_one_or_none.return_value = mock_notification
 
     status = service.get_status(mock_db, "test-uuid")
-    assert status == OutboundStatus.SENT
+    assert status == "SENT"
 
 
 def test_service_get_status_returns_none_when_not_found():
@@ -323,11 +349,70 @@ def test_service_get_status_failed():
 
     mock_db = MagicMock()
     mock_notification = MagicMock()
-    mock_notification.status = OutboundStatus.FAILED
+    mock_notification.status = "FAILED"
     mock_db.execute.return_value.scalar_one_or_none.return_value = mock_notification
 
     status = service.get_status(mock_db, "test-uuid")
-    assert status == OutboundStatus.FAILED
+    assert status == "FAILED"
+
+
+def test_service_adapter_config_error_skips_retry():
+    from ..service import OutboundService
+    from ..adapters import OutboundAdapterRegistry, BaseOutboundAdapter, SendResult
+    from unittest.mock import MagicMock, AsyncMock
+
+    class ConfigErrorAdapter(BaseOutboundAdapter):
+        name = "smtp"
+        channel = "email"
+
+        async def send(self, *args, **kwargs):
+            raise AdapterConfigError(adapter_name="smtp", reason="Missing host")
+
+        async def validate_contact(self, contact: str) -> bool:
+            return True
+
+    registry = OutboundAdapterRegistry()
+    registry.register(adapter=ConfigErrorAdapter(), channel="email", name="smtp", set_default=True)
+
+    mock_context = MagicMock()
+    mock_db = MagicMock()
+    mock_context.get_db.return_value = iter([mock_db])
+    mock_context.get_db.return_value.__aiter__ = lambda self: self
+    mock_context.get_db.return_value.__anext__ = MagicMock(return_value=mock_db)
+
+    service = OutboundService(
+        adapter_registry=registry,
+        config=get_outbound_config(None),
+        module_context=mock_context,
+    )
+
+    mock_outbound = MagicMock()
+    mock_outbound.uuid = "test-uuid"
+    mock_outbound.module_name = "order_service"
+    mock_outbound.channel = "email"
+    mock_outbound.recipient_id = "user_1"
+    mock_outbound.recipient_contact = "user@example.com"
+    mock_outbound.subject = "Test"
+    mock_outbound.body = "Body"
+    mock_outbound.messaging_metadata = None
+    mock_outbound.status = OutboundStatus.PENDING
+    mock_outbound.attempts = 0
+    mock_outbound.last_error = None
+
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_outbound
+
+    asyncio.run(
+        service._deliver_async(
+            messaging_uuid="test-uuid",
+            adapter_name="smtp",
+            overrides=None,
+            content_type="text/plain",
+        )
+    )
+
+    assert mock_outbound.status == OutboundStatus.FAILED
+    assert mock_outbound.attempts == 1
+    assert "Missing host" in mock_outbound.last_error
 
 
 def run_module_tests():

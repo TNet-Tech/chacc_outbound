@@ -134,4 +134,4 @@ async def get_outbound_message_status(
     status = service.get_status(db, outbound_uuid)
     if status is None:
         raise HTTPException(status_code=404, detail="Outbound Message not found")
-    return {"uuid": outbound_uuid, "status": status.value}
+    return {"uuid": outbound_uuid, "status": status}

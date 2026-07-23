@@ -1,11 +1,11 @@
 import re
-import uuid
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 from .base import BaseOutboundAdapter, SendResult
+from ..exceptions import AdapterConfigError
 
 
 class EmailOutboundAdapter(BaseOutboundAdapter):
@@ -25,34 +25,33 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
         body: Optional[str] = None,
         content_type: str = "text/plain",
     ) -> SendResult:
-        try:
-            if self.smtp_config and not await self.validate_contact(recipient_contact):
-                return SendResult(
-                    status="failed",
-                    error_message="Invalid email address",
-                )
-
-            subject = subject or ""
-            body = body or ""
-
-            outbound_message_uuid = await self._send_email(
-                to=recipient_contact,
-                subject=subject,
-                body=body,
-                content_type=content_type,
+        if not self.smtp_config:
+            raise AdapterConfigError(
+                adapter_name="smtp",
+                reason="SMTP configuration is missing. EMAIL_BACKEND=smtp requires host, port, username, and password.",
             )
 
-            return SendResult(
-                status="sent",
-                message_id=outbound_message_uuid,
-                metadata={"recipient": recipient_contact},
-            )
-
-        except Exception as e:
+        if not await self.validate_contact(recipient_contact):
             return SendResult(
                 status="failed",
-                error_message=str(e),
+                error_message="Invalid email address",
             )
+
+        subject = subject or ""
+        body = body or ""
+
+        await self._send_email(
+            to=recipient_contact,
+            subject=subject,
+            body=body,
+            content_type=content_type,
+        )
+
+        return SendResult(
+            status="sent",
+            message_id=f"smtp_{messaging_uuid}",
+            metadata={"recipient": recipient_contact},
+        )
 
     async def validate_contact(self, contact: str) -> bool:
         email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -64,20 +63,8 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
         subject: str,
         body: str,
         content_type: str = "text/plain",
-    ) -> str:
+    ) -> None:
         subtype = "plain" if content_type == "text/plain" else content_type
-
-        if not self.smtp_config:
-            print(f"\n{'='*80}")
-            print(f"EMAIL (Console Backend)")
-            print(f"{'='*80}")
-            print(f"To: {to}")
-            print(f"Subject: {subject}")
-            print(f"Type: {'HTML' if subtype == 'html' else 'Text'}")
-            print(f"{'-'*80}")
-            print(body)
-            print(f"{'='*80}\n")
-            return f"console_{uuid.uuid4()}"
 
         if subtype == "html":
             msg = MIMEMultipart("alternative")
@@ -103,11 +90,9 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
                 )
             server.send_message(msg)
 
-        return f"smtp_{uuid.uuid4()}"
-
     async def health_check(self) -> bool:
         if not self.smtp_config:
-            return True
+            return False
         try:
             with smtplib.SMTP(
                 self.smtp_config["host"],

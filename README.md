@@ -7,10 +7,19 @@ A ChaCC module providing **outbound messaging via adapters** (email, SMS, push, 
 - **Direct sends**: Send content directly with full control over subject, body, channel, and adapter
 - **Email (HTML/Text)**: SMTP adapter + console adapter for development
 - **SMS and more**: Extensible adapter pattern for SMS providers (Twilio, etc.)
-- **Retry & backoff**: Automatic retries with configurable backoff per module
+- **Retry & backoff**: Automatic retries with configurable backoff per module; config/adapter-not-found errors skip retries
 - **Async delivery**: Fire-and-forget with status tracking
 - **Programmatic API**: Other modules use `OutboundService` directly — no HTTP required
 - **REST API**: Admin endpoints for outbound records and sending
+
+## Requirements
+
+When using the `EmailOutboundAdapter` with a real SMTP backend, all of the following must be configured:
+
+- `EMAIL_SMTP_HOST`
+- `EMAIL_SMTP_PORT`
+- `EMAIL_SMTP_USERNAME`
+- `EMAIL_SMTP_PASSWORD`
 
 ## Installation
 
@@ -32,12 +41,12 @@ The module reads configuration from the ChaCC module context. Set these keys for
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `EMAIL_BACKEND` | `console` | Adapter to use: `console` for dev, `smtp` for production |
+| `EMAIL_BACKEND` | `console` | Active adapter name: `console` for dev, `smtp` for production |
 | `EMAIL_SMTP_HOST` | `""` | SMTP server host (required when `EMAIL_BACKEND=smtp`) |
 | `EMAIL_SMTP_PORT` | `587` | SMTP server port |
-| `EMAIL_SMTP_USERNAME` | `""` | SMTP authentication username |
-| `EMAIL_SMTP_PASSWORD` | `""` | SMTP authentication password |
-| `EMAIL_SMTP_FROM` | `noreply@example.com` | Default sender email address |
+| `EMAIL_SMTP_USERNAME` | `""` | SMTP authentication username (required when `EMAIL_BACKEND=smtp`) |
+| `EMAIL_SMTP_PASSWORD` | `""` | SMTP authentication password (required when `EMAIL_BACKEND=smtp`) |
+| `EMAIL_SMTP_FROM` | `noreply@example.com` | Default sender email address (required when `EMAIL_BACKEND=smtp`) |
 | `ENVIRONMENT` | `development` | Environment name |
 
 ### Example: SMTP configuration
@@ -52,7 +61,10 @@ EMAIL_SMTP_PASSWORD=your_password
 EMAIL_SMTP_FROM=alerts@yourapp.com
 ```
 
-When `EMAIL_BACKEND=console` or `EMAIL_SMTP_HOST` is empty, messages print to stdout instead of sending.
+### Startup behavior
+
+- When `EMAIL_BACKEND=console`, the module registers a `ConsoleOutboundAdapter`.
+- When `EMAIL_BACKEND=smtp` but any required SMTP setting is missing/empty, the module still registers an `EmailOutboundAdapter`, but sending will fail with `AdapterConfigError` and the outbound record is marked `FAILED` without retries.
 
 ## Quick Start
 
@@ -61,10 +73,8 @@ When `EMAIL_BACKEND=console` or `EMAIL_SMTP_HOST` is empty, messages print to st
 ```python
 from chacc_outbound_src.context_factory import get_outbound_service, get_db
 
-# Get the service from context
 outbound_service = get_outbound_service()
 
-# Send a message
 async for db in get_db():
     result = await outbound_service.send(
         db=db,
@@ -75,7 +85,6 @@ async for db in get_db():
         module_name="order_service",
         channel="email",
     )
-    # result is a dict: uuid, module_name, recipient_id, channel, subject, body, ...
     await db.commit()
 ```
 
@@ -99,8 +108,6 @@ curl -X POST http://localhost:8085/outbound/send \
 ## Sending Messages
 
 ### Direct send (`send`)
-
-Bypasses template lookup. Use this for all messaging — content is passed directly.
 
 ```python
 # Email - text (default)
@@ -173,8 +180,15 @@ These defaults apply when a send call does not specify the corresponding paramet
 
 ## Retrieving Messages
 
+```python
+# Get by UUID
+outbound = outbound_service.get_message(db, outbound_uuid)
+
 # Get status only
 status = outbound_service.get_status(db, outbound_uuid)
+```
+
+## Custom Adapters
 
 Implement `BaseOutboundAdapter` to add new channels (SMS, push, etc.).
 
@@ -195,7 +209,6 @@ class SMSOutboundAdapter(BaseOutboundAdapter):
         body: Optional[str] = None,
         content_type: str = "text/plain",
     ) -> SendResult:
-        # Send via Twilio
         message = client.messages.create(
             body=body or "",
             from_="+1234567890",
@@ -226,14 +239,17 @@ registry.register(
 The service raises specific exceptions:
 
 - `AdapterNotFoundError` — no adapter registered for the channel
+- `AdapterConfigError` — adapter is registered but missing required configuration
 
 ```python
-from chacc_outbound_src.exceptions import AdapterNotFoundError
+from chacc_outbound_src.exceptions import AdapterNotFoundError, AdapterConfigError
 
 try:
     result = await outbound_service.send(...)
 except AdapterNotFoundError as e:
     # Handle missing adapter
+except AdapterConfigError as e:
+    # Handle missing/broken adapter configuration; outbound is already marked FAILED
 ```
 
 ## Architecture
@@ -243,7 +259,7 @@ except AdapterNotFoundError as e:
 ```mermaid
 flowchart TD
     subgraph chacc_outbound[chacc_outbound Module]
-        REST[REST API - FastAPI /messaging/*]
+        REST[REST API - FastAPI /outbound/*]
         PROG[Programmatic API - OutboundService]
         
         subgraph Service[OutboundService]
@@ -259,7 +275,10 @@ flowchart TD
         DELIVER[_deliver_async - retry loop]
         
         CONSOLE[Console Adapter - dev/staging]
-        EMAIL[Email Adapter - SMTP / console]
+        EMAIL[Email Adapter - SMTP
+Fail-fast:
+- missing adapter -> FAILED
+- missing adapter config -> FAILED]
         CUSTOM[Custom Adapters - SMS, push]
     end
     
@@ -325,6 +344,9 @@ flowchart TD
     O -->|No| Q[status=FAILED last_error=last_error commit]
     Q --> End4([Return])
     Error1 --> End5([Return])
+    K --> AdapterConfigError1[AdapterConfigError]
+    AdapterConfigError1 --> Error2[status=FAILED last_error=reason commit]
+    Error2 --> End6([Return])
 ```
 
 ### Override Resolution
@@ -356,8 +378,17 @@ class BaseOutboundAdapter:
     name: str              # e.g. "console", "smtp", "twilio"
     channel: str           # e.g. "email", "sms"
 
-    async def send(...) -> SendResult
-    async def validate_contact(contact: str) -> bool
+    async def send(
+        messaging_uuid: str,
+        recipient_id: str,
+        recipient_contact: str,
+        metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
+        content_type: str = "text/plain",
+    ) -> SendResult
+
+    async def validate_contact(self, contact: str) -> bool
 ```
 
 ## Running Tests
