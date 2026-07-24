@@ -5,8 +5,9 @@ from typing import Optional
 from .routes import router as chacc_outbound_router
 from .context_factory import get_context, get_module_context, set_module_context
 from .config import get_outbound_config
-from .adapters import OutboundAdapterRegistry, ConsoleOutboundAdapter, EmailOutboundAdapter
+from .adapters import OutboundAdapterRegistry, ConsoleOutboundAdapter, EmailOutboundAdapter, BaseOutboundAdapter, SendResult
 from .service import OutboundService
+from .adapter_service import OutboundAdapterRegistryService
 
 
 health_router = APIRouter()
@@ -33,31 +34,32 @@ def setup_plugin(context: Optional[BackboneContext] = None):
 
     config = get_outbound_config(_module_context)
 
-    email_backend = config["CHACC_OUTBOUND_EMAIL_BACKEND"]
-    adapter_name = email_backend
-    if email_backend == "console":
-        adapter = ConsoleOutboundAdapter()
-    else:
-        smtp_config = {
-            "host": config["CHACC_OUTBOUND_EMAIL_SMTP_HOST"],
-            "port": config["CHACC_OUTBOUND_EMAIL_SMTP_PORT"],
-            "username": config["CHACC_OUTBOUND_EMAIL_SMTP_USERNAME"],
-            "password": config["CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD"],
-            "from_email": config["CHACC_OUTBOUND_EMAIL_SMTP_FROM"],
-            "use_tls": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS", False),
-        }
-        adapter = EmailOutboundAdapter(smtp_config=smtp_config if smtp_config["host"] else None)
-
     registry = OutboundAdapterRegistry()
-    registry.register(adapter=adapter, channel="email", name=adapter_name, set_default=True)
+    registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
+
+    smtp_config = {
+        "host": config.get("CHACC_OUTBOUND_EMAIL_SMTP_HOST"),
+        "port": config.get("CHACC_OUTBOUND_EMAIL_SMTP_PORT"),
+        "username": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USERNAME"),
+        "password": config.get("CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD"),
+        "from_email": config.get("CHACC_OUTBOUND_EMAIL_SMTP_FROM"),
+        "use_tls": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS", False),
+    }
+    smtp_adapter = EmailOutboundAdapter(smtp_config=smtp_config if smtp_config["host"] else None)
+    registry.register(adapter=smtp_adapter, channel="email", name="smtp")
+
+    adapter_registry_service = OutboundAdapterRegistryService(registry=registry)
 
     outbound_service = OutboundService(
-        adapter_registry=registry,
         config=config,
         module_context=_module_context,
+        adapter_registry_service=adapter_registry_service,
     )
 
     _module_context.register_service("outbound_service", outbound_service)
+    _module_context.register_service("outbound_adapter_registry", adapter_registry_service)
+    _module_context.register_service("outbound_base_adapter", BaseOutboundAdapter)
+    _module_context.register_service("outbound_send_result", SendResult)
 
     chacc_outbound_router.include_router(health_router)
     return chacc_outbound_router

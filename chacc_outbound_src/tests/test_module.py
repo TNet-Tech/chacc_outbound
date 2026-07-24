@@ -197,8 +197,9 @@ def test_messaging_adapter_registry_list():
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
     registry.register(adapter=EmailOutboundAdapter(smtp_config=None), channel="email", name="smtp")
     adapters = registry.list_adapters()
-    assert "email" in adapters
-    assert len(adapters["email"]) == 2
+    assert len(adapters) == 2
+    assert {"name": "console", "channel": "email", "description": "Prints messages to the console for local testing"} in adapters
+    assert {"name": "smtp", "channel": "email", "description": "Sends real emails via SMTP"} in adapters
 
 
 def test_messaging_adapter_registry_missing():
@@ -223,9 +224,9 @@ def test_service_send_returns_serialized_dict():
     mock_context.get_db.return_value.__anext__ = MagicMock(side_effect=StopAsyncIteration)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=mock_context,
+        adapter_registry_service=MagicMock(),
     )
 
     mock_db = MagicMock()
@@ -267,9 +268,9 @@ def test_service_rate_limit_without_redis():
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=MagicMock(),
+        adapter_registry_service=MagicMock(),
         redis=None,
     )
 
@@ -290,9 +291,9 @@ def test_service_get_status_returns_status():
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=MagicMock(),
+        adapter_registry_service=MagicMock(),
     )
 
     mock_db = MagicMock()
@@ -313,9 +314,9 @@ def test_service_get_status_returns_none_when_not_found():
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=MagicMock(),
+        adapter_registry_service=MagicMock(),
     )
 
     mock_db = MagicMock()
@@ -334,9 +335,9 @@ def test_service_get_status_failed():
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=MagicMock(),
+        adapter_registry_service=MagicMock(),
     )
 
     mock_db = MagicMock()
@@ -351,6 +352,7 @@ def test_service_get_status_failed():
 def test_service_adapter_config_error_skips_retry():
     from ..service import OutboundService
     from ..adapters import OutboundAdapterRegistry, BaseOutboundAdapter, SendResult
+    from ..adapter_service import OutboundAdapterRegistryService
     from unittest.mock import MagicMock, AsyncMock
 
     class ConfigErrorAdapter(BaseOutboundAdapter):
@@ -365,6 +367,7 @@ def test_service_adapter_config_error_skips_retry():
 
     registry = OutboundAdapterRegistry()
     registry.register(adapter=ConfigErrorAdapter(), channel="email", name="smtp", set_default=True)
+    adapter_registry_service = OutboundAdapterRegistryService(registry=registry)
 
     class _AsyncDBIter:
         def __init__(self, db):
@@ -385,9 +388,9 @@ def test_service_adapter_config_error_skips_retry():
     mock_context.get_db.return_value = _AsyncDBIter(mock_db)
 
     service = OutboundService(
-        adapter_registry=registry,
         config=get_outbound_config(None),
         module_context=mock_context,
+        adapter_registry_service=adapter_registry_service,
     )
 
     mock_outbound = MagicMock()

@@ -5,7 +5,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
 from .context_factory import get_db, get_outbound_service
-from .models import Outbound
+from .models import Outbound, OutboundModuleMapping
 from .service import OutboundService
 from .exceptions import AdapterNotFoundError
 
@@ -49,6 +49,30 @@ class OutboundResponse(BaseModel):
     sent_at: Optional[str]
     attempts: int
     last_error: Optional[str]
+
+
+class ModuleMappingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    module_name: str
+    default_adapter_name: Optional[str]
+    default_channel: Optional[str]
+    max_retry_attempts: Optional[int]
+    retry_backoff_seconds: Optional[int]
+    rate_limit_per_minute: Optional[int]
+    is_active: Optional[bool]
+    description: Optional[str]
+
+
+class CreateModuleMappingRequest(BaseModel):
+    module_name: str = Field(..., description="Module name this mapping applies to")
+    default_adapter_name: Optional[str] = Field(default=None, description="Default adapter for this module")
+    default_channel: Optional[str] = Field(default=None, description="Default channel for this module")
+    max_retry_attempts: Optional[int] = Field(default=None, ge=1, description="Max retry attempts")
+    retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, description="Initial backoff seconds between retries")
+    rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, description="Max sends per minute")
+    is_active: Optional[bool] = Field(default=None, description="Whether this module is active")
+    description: Optional[str] = Field(default=None, description="Human-readable description")
 
 
 class Pager(BaseModel):
@@ -193,3 +217,123 @@ async def get_outbound_message_status(
     if status is None:
         raise HTTPException(status_code=404, detail="Outbound Message not found")
     return {"uuid": outbound_uuid, "status": status}
+
+
+@router.get("/module-mappings", response_model=BaseResponseModel[ModuleMappingResponse])
+async def list_module_mappings(
+    params: PaginationParams = Depends(),
+    module_name: Optional[str] = Query(None, description="Filter by module name"),
+    service: OutboundService = Depends(get_outbound_service),
+    db: Session = Depends(get_db),
+):
+    stmt = select(OutboundModuleMapping)
+    if module_name:
+        stmt = stmt.where(OutboundModuleMapping.module_name == module_name)
+    stmt = stmt.order_by(OutboundModuleMapping.module_name)
+
+    if not params.paging:
+        result = db.execute(stmt)
+        items = result.scalars().all()
+        return BaseResponseModel(
+            success=True,
+            message="Data fetched successfully",
+            data=items,
+            total=None,
+            pager=None,
+        )
+
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+    paginated = db.execute(stmt.offset((params.page - 1) * params.size).limit(params.size))
+    items = paginated.scalars().all()
+    pages = (total + params.size - 1) // params.size if params.size else 1
+
+    return BaseResponseModel(
+        success=True,
+        message="Data fetched successfully",
+        data=items,
+        total=total,
+        pager=Pager(page=params.page, size=params.size, pages=pages),
+    )
+
+
+@router.get("/adapters")
+async def list_adapters(
+    service: OutboundService = Depends(get_outbound_service),
+):
+    adapters = service.adapter_registry_service.list_adapters()
+    return {"success": True, "data": adapters}
+
+
+@router.get("/module-mappings/{module_name}", response_model=ModuleMappingResponse)
+async def get_module_mapping(
+    module_name: str,
+    service: OutboundService = Depends(get_outbound_service),
+    db: Session = Depends(get_db),
+):
+    mapping = service.get_module_mapping(db, module_name)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Module mapping not found")
+    return mapping
+
+
+@router.post("/module-mappings", response_model=ModuleMappingResponse)
+async def create_module_mapping(
+    payload: CreateModuleMappingRequest,
+    service: OutboundService = Depends(get_outbound_service),
+    db: Session = Depends(get_db),
+):
+    mapping = service._create_or_update_module_mapping(
+        db=db,
+        module_name=payload.module_name,
+        default_adapter_name=payload.default_adapter_name,
+        default_channel=payload.default_channel,
+        max_retry_attempts=payload.max_retry_attempts,
+        retry_backoff_seconds=payload.retry_backoff_seconds,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        is_active=payload.is_active,
+        description=payload.description,
+    )
+    db.commit()
+    db.refresh(mapping)
+    return mapping
+
+
+@router.put("/module-mappings/{module_name}", response_model=ModuleMappingResponse)
+async def update_module_mapping(
+    module_name: str,
+    payload: CreateModuleMappingRequest,
+    service: OutboundService = Depends(get_outbound_service),
+    db: Session = Depends(get_db),
+):
+    existing = service.get_module_mapping(db, module_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Module mapping not found")
+
+    mapping = service._create_or_update_module_mapping(
+        db=db,
+        module_name=module_name,
+        default_adapter_name=payload.default_adapter_name,
+        default_channel=payload.default_channel,
+        max_retry_attempts=payload.max_retry_attempts,
+        retry_backoff_seconds=payload.retry_backoff_seconds,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        is_active=payload.is_active,
+        description=payload.description,
+    )
+    db.commit()
+    db.refresh(mapping)
+    return mapping
+
+
+@router.delete("/module-mappings/{module_name}")
+async def delete_module_mapping(
+    module_name: str,
+    service: OutboundService = Depends(get_outbound_service),
+    db: Session = Depends(get_db),
+):
+    mapping = service.get_module_mapping(db, module_name)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Module mapping not found")
+    db.delete(mapping)
+    db.commit()
+    return {"success": True, "message": f"Module mapping '{module_name}' deleted"}

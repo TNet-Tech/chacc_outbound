@@ -58,7 +58,7 @@ CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS=true
 
 ### Module settings
 
-Per-module behavior (retries, backoff, rate limits, default adapter, and default channel) is stored in the database using the `OutboundModuleMapping` model. This means you don't need environment variables for these — you configure them once in the database and they apply automatically to every message sent by that module.
+Per-module behavior (retries, backoff, rate limits, default adapter, and default channel) is stored in the database using the `OutboundModuleMapping` model. You configure these through the REST API — no code changes needed.
 
 #### Default values
 
@@ -72,27 +72,53 @@ If no mapping exists for a module, the module uses these built-in defaults:
 | `default_adapter_name` | app-wide default (`console` in dev, `smtp` in production) |
 | `default_channel` | `email` |
 
-#### Creating or updating a mapping
+### Managing module mappings
 
-Use the programmatic API from any module, a script, or an admin route:
+Module mappings are managed through the REST API. Only admins or authorized users should call these endpoints. Other modules should not modify mappings programmatically.
 
-```python
-from chacc_outbound_src.context_factory import get_outbound_service, get_db
+**List all mappings**
 
-outbound_service = get_outbound_service()
+```bash
+curl http://localhost:8085/outbound/module-mappings
+```
 
-async for db in get_db():
-    mapping = outbound_service.create_or_update_module_mapping(
-        db=db,
-        module_name="order_service",
-        max_retry_attempts=5,
-        retry_backoff_seconds=60,
-        rate_limit_per_minute=20,
-        default_adapter_name="smtp",
-        default_channel="email",
-        description="Order notifications with aggressive retry",
-    )
-    await db.commit()
+**Get one mapping**
+
+```bash
+curl http://localhost:8085/outbound/module-mappings/order_service
+```
+
+**Create a mapping**
+
+```bash
+curl -X POST http://localhost:8085/outbound/module-mappings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "module_name": "order_service",
+    "max_retry_attempts": 5,
+    "retry_backoff_seconds": 60,
+    "rate_limit_per_minute": 20,
+    "default_adapter_name": "smtp",
+    "default_channel": "email",
+    "description": "Order notifications with aggressive retry"
+  }'
+```
+
+**Update a mapping**
+
+```bash
+curl -X PUT http://localhost:8085/outbound/module-mappings/order_service \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_retry_attempts": 10,
+    "retry_backoff_seconds": 30
+  }'
+```
+
+**Delete a mapping**
+
+```bash
+curl -X DELETE http://localhost:8085/outbound/module-mappings/order_service
 ```
 
 #### What each field means
@@ -107,30 +133,6 @@ async for db in get_db():
 | `default_channel` | Default channel if not specified per send |
 | `is_active` | Set to `false` to pause all sends for this module |
 | `description` | Human-readable note for admins |
-
-#### Example configurations
-
-```python
-# Order service: retry fast, limit rate, use SMTP
-outbound_service.create_or_update_module_mapping(
-    db=db,
-    module_name="order_service",
-    max_retry_attempts=5,
-    retry_backoff_seconds=60,
-    rate_limit_per_minute=20,
-    default_adapter_name="smtp",
-    default_channel="email",
-)
-
-# Auth service: fewer retries, no rate limit
-outbound_service.create_or_update_module_mapping(
-    db=db,
-    module_name="auth_service",
-    max_retry_attempts=2,
-    retry_backoff_seconds=30,
-    default_channel="email",
-)
-```
 
 ## How it works
 
@@ -175,12 +177,26 @@ PENDING → FAILED   (missing config, bad adapter, etc.)
 
 ## Using it from another module
 
-### Quick example
+Everything is accessed through the module context. No imports from `chacc_outbound_src` are needed.
+
+### Services exposed by this module
+
+| Service name | What it does |
+|-------------|-------------|
+| `outbound_service` | Send messages, check status, read module mappings |
+| `outbound_adapter_registry` | Register and retrieve adapters by channel |
+| `outbound_base_adapter` | Base class for custom adapters |
+| `outbound_send_result` | Return type for adapter `send()` method |
+
+> Module mappings are read-only through `outbound_service`. Use the REST API to create or update mappings.
+
+### Send a message
 
 ```python
-from chacc_outbound_src.context_factory import get_outbound_service, get_db
+from .context_factory import get_module_context, get_db
 
-outbound_service = get_outbound_service()
+context = get_module_context()
+outbound_service = context.get_service("outbound_service")
 
 async for db in get_db():
     result = await outbound_service.send(
@@ -209,6 +225,18 @@ The `result` is a dictionary with the message UUID and current status. Since del
 | `channel` | No | Defaults to `email` |
 | `adapter_name` | No | Override the default adapter for this send |
 | `content_type` | No | `text/plain` or `html` (for email) |
+
+### Check message status
+
+```python
+from .context_factory import get_module_context, get_db
+
+context = get_module_context()
+outbound_service = context.get_service("outbound_service")
+
+async for db in get_db():
+    status = outbound_service.get_status(db, message_uuid)
+```
 
 ## REST API
 
@@ -282,7 +310,7 @@ Response shape:
 curl http://localhost:8085/outbound/messages/019f90bf-a50b-7d13-8937-f6e98cabc71e
 ```
 
-### Check status only
+### Check message status
 
 ```bash
 curl http://localhost:8085/outbound/messages/019f90bf-a50b-7d13-8937-f6e98cabc71e/status
@@ -297,6 +325,72 @@ Returns:
 }
 ```
 
+### List module mappings
+
+```bash
+curl http://localhost:8085/outbound/module-mappings
+
+# Filter by module
+curl http://localhost:8085/outbound/module-mappings?module_name=order_service
+```
+
+### Get one module mapping
+
+```bash
+curl http://localhost:8085/outbound/module-mappings/order_service
+```
+
+### Create module mapping
+
+```bash
+curl -X POST http://localhost:8085/outbound/module-mappings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "module_name": "order_service",
+    "max_retry_attempts": 5,
+    "retry_backoff_seconds": 60,
+    "rate_limit_per_minute": 20,
+    "default_adapter_name": "smtp",
+    "default_channel": "email",
+    "description": "Order notifications"
+  }'
+```
+
+### Update module mapping
+
+```bash
+curl -X PUT http://localhost:8085/outbound/module-mappings/order_service \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_retry_attempts": 10,
+    "retry_backoff_seconds": 30
+  }'
+```
+
+### Delete module mapping
+
+```bash
+curl -X DELETE http://localhost:8085/outbound/module-mappings/order_service
+```
+
+### List adapters
+
+```bash
+curl http://localhost:8085/outbound/adapters
+```
+
+Returns:
+
+```json
+{
+  "success": true,
+  "data": [
+    {"name": "console", "channel": "email", "description": "Prints messages to the console for local testing"},
+    {"name": "smtp", "channel": "email", "description": "Sends real emails via SMTP"}
+  ]
+}
+```
+
 ## Message statuses
 
 | Status | Meaning |
@@ -305,6 +399,45 @@ Returns:
 | `SENT` | Delivered successfully |
 | `RETRYING` | Delivery failed, will try again |
 | `FAILED` | Gave up. Check `last_error` for why |
+
+## Extending with custom adapters
+
+Want to send SMS, push notifications, or something else? Create an adapter by subclassing the base adapter class.
+
+```python
+from .context_factory import get_module_context
+
+context = get_module_context()
+BaseOutboundAdapter = context.get_service("outbound_base_adapter")
+SendResult = context.get_service("outbound_send_result")
+
+class SMSOutboundAdapter(BaseOutboundAdapter):
+    name = "twilio"
+    channel = "sms"
+
+    async def send(self, messaging_uuid, recipient_id, recipient_contact, metadata=None, subject=None, body=None, content_type="text/plain"):
+        # Your delivery logic here
+        return SendResult(status="sent", message_id="twilio_123")
+
+    async def validate_contact(self, contact):
+        return contact.startswith("+")
+```
+
+Register it through the module context:
+
+```python
+from .context_factory import get_module_context
+
+context = get_module_context()
+adapter_registry = context.get_service("outbound_adapter_registry")
+
+adapter_registry.register(
+    adapter=SMSOutboundAdapter(),
+    channel="sms",
+    name="twilio",
+    set_default=True,
+)
+```
 
 ## Debugging
 
@@ -342,34 +475,6 @@ This was a known issue caused by the database session closing before the status 
 | `SMTPAuthenticationError` | Wrong username/password |
 | `SMTPSenderRefused` | `EMAIL_SMTP_FROM` address is not allowed by your mail server |
 | `SMTPServerDisconnected` | Firewall, wrong port, or server down |
-
-## Extending with custom adapters
-
-Want to send SMS, push notifications, or something else? Create an adapter:
-
-```python
-from chacc_outbound_src.adapters.base import BaseOutboundAdapter, SendResult
-
-class SMSOutboundAdapter(BaseOutboundAdapter):
-    name = "twilio"
-    channel = "sms"
-
-    async def send(self, messaging_uuid, recipient_id, recipient_contact, metadata=None, subject=None, body=None, content_type="text/plain"):
-        # Your delivery logic here
-        return SendResult(status="sent", message_id="twilio_123")
-
-    async def validate_contact(self, contact):
-        return contact.startswith("+")
-```
-
-Register it in `setup_plugin()`:
-
-```python
-from chacc_outbound_src.adapters import OutboundAdapterRegistry, SMSOutboundAdapter
-
-registry = OutboundAdapterRegistry()
-registry.register(adapter=SMSOutboundAdapter(), channel="sms", name="twilio", set_default=True)
-```
 
 ## Architecture
 

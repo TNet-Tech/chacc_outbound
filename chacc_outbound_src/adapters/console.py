@@ -7,6 +7,7 @@ from .base import BaseOutboundAdapter, SendResult
 class ConsoleOutboundAdapter(BaseOutboundAdapter):
     name = "console"
     channel = "email"
+    description = "Prints messages to the console for local testing"
 
     async def send(
         self,

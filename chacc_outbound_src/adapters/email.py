@@ -11,6 +11,7 @@ from ..exceptions import AdapterConfigError
 class EmailOutboundAdapter(BaseOutboundAdapter):
     name = "smtp"
     channel = "email"
+    description = "Sends real emails via SMTP"
 
     def __init__(self, smtp_config: Optional[dict] = None):
         self.smtp_config = smtp_config

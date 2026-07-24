@@ -29,6 +29,7 @@ class BaseOutboundAdapter(ABC):
 
     name: str = "base"
     channel: str = "unknown"
+    description: Optional[str] = None
 
     @abstractmethod
     async def send(
@@ -92,14 +93,19 @@ class OutboundAdapterRegistry:
 
         return self._adapters[key]
 
-    def list_adapters(self) -> dict:
+    def list_adapters(self) -> list:
         """List all registered adapters."""
-        result = {}
+        result = []
+        seen = set()
         for key, adapter in self._adapters.items():
             channel, name = key.split(":", 1)
-            if channel not in result:
-                result[channel] = []
-            result[channel].append({"name": name, "class": adapter.__class__.__name__})
+            if name in seen:
+                continue
+            seen.add(name)
+            entry = {"name": name, "channel": channel}
+            if adapter.description:
+                entry["description"] = adapter.description
+            result.append(entry)
         return result
 
     def get_default(self, channel: str) -> Optional[BaseOutboundAdapter]:

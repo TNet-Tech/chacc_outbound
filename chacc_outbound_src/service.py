@@ -5,7 +5,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from .models import Outbound, OutboundModuleMapping, OutboundStatus
-from .adapters import OutboundAdapterRegistry
+from .adapter_service import OutboundAdapterRegistryService
 from .exceptions import RETRYABLE_EXCEPTIONS, NON_RETRYABLE_EXCEPTIONS, AdapterConfigError, AdapterNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 class OutboundService:
     def __init__(
         self,
-        adapter_registry: OutboundAdapterRegistry,
         config: dict,
         module_context=None,
+        adapter_registry_service: Optional[OutboundAdapterRegistryService] = None,
         redis=None,
     ):
-        self.adapters = adapter_registry
+        self.adapter_registry_service = adapter_registry_service
         self.config = config
         self.module_context = module_context
         self.redis = redis
@@ -34,7 +34,6 @@ class OutboundService:
         module_name: str,
         subject: Optional[str] = None,
         channel: str = "email",
-        adapter_name: Optional[str] = None,
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
@@ -55,6 +54,8 @@ class OutboundService:
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
 
+        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("CHACC_OUTBOUND_EMAIL_BACKEND", "console")
+
         outbound_message = Outbound(
             module_name=module_name,
             recipient_id=recipient_id,
@@ -70,7 +71,7 @@ class OutboundService:
         db.flush()
         db.commit()
 
-        resolved_adapter_name = adapter_name or "console"
+        resolved_adapter_name = mapping.default_adapter_name or self.config.get("CHACC_OUTBOUND_EMAIL_BACKEND", "console")
 
         task = asyncio.create_task(
             self._deliver_async(
@@ -136,10 +137,10 @@ class OutboundService:
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
-            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else None) or "console"
+            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else self.config.get("EMAIL_BACKEND", "console")) or "console"
             logger.info("Delivering outbound %s via adapter=%s retries=%s backoff=%s", messaging_uuid, effective_adapter_name, max_retries, backoff)
             try:
-                adapter = self.adapters.get(
+                adapter = self.adapter_registry_service.get(
                     channel=messaging.channel,
                     adapter_name=effective_adapter_name,
                 )
@@ -296,7 +297,7 @@ class OutboundService:
         )
         return result.scalar_one_or_none()
 
-    def create_or_update_module_mapping(
+    def _create_or_update_module_mapping(
         self,
         db,
         module_name: str,
