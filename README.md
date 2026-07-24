@@ -31,29 +31,29 @@ Settings are shared across the whole app via environment variables. Pick the ada
 No extra setup needed. Messages are printed to the console instead of being sent anywhere. Great for testing.
 
 ```bash
-CHACC_OUTBOUND_EMAIL_BACKEND=console
+EMAIL_BACKEND=console
 ```
 
 ### SMTP (production email)
 
 | Setting | What it is | Example |
 |---------|-----------|---------|
-| `CHACC_OUTBOUND_EMAIL_BACKEND` | Use `smtp` for real email | `smtp` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_HOST` | Your mail server address | `smtp.mailprovider.com` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_PORT` | Usually `465` (SSL) or `587` (STARTTLS) | `465` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_USERNAME` | Login for your mail server | `alerts@yourapp.com` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD` | Password or app-specific password | `hunter2` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_FROM` | The "from" address on outgoing emails | `noreply@yourapp.com` |
-| `CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS` | Set `true` if your server needs explicit TLS | `true` |
+| `EMAIL_BACKEND` | Use `smtp` for real email | `smtp` |
+| `EMAIL_SMTP_HOST` | Your mail server address | `smtp.mailprovider.com` |
+| `EMAIL_SMTP_PORT` | Usually `465` (SSL) or `587` (STARTTLS) | `465` |
+| `EMAIL_SMTP_USERNAME` | Login for your mail server | `alerts@yourapp.com` |
+| `EMAIL_SMTP_PASSWORD` | Password or app-specific password | `hunter2` |
+| `EMAIL_SMTP_FROM` | The "from" address on outgoing emails | `noreply@yourapp.com` |
+| `EMAIL_SMTP_USE_TLS` | Set `true` if your server needs explicit TLS | `true` |
 
 ```bash
-CHACC_OUTBOUND_EMAIL_BACKEND=smtp
-CHACC_OUTBOUND_EMAIL_SMTP_HOST=smtp.mailprovider.com
-CHACC_OUTBOUND_EMAIL_SMTP_PORT=465
-CHACC_OUTBOUND_EMAIL_SMTP_USERNAME=alerts@yourapp.com
-CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD=your_password
-CHACC_OUTBOUND_EMAIL_SMTP_FROM=noreply@yourapp.com
-CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS=true
+EMAIL_BACKEND=smtp
+EMAIL_SMTP_HOST=smtp.mailprovider.com
+EMAIL_SMTP_PORT=465
+EMAIL_SMTP_USERNAME=alerts@yourapp.com
+EMAIL_SMTP_PASSWORD=your_password
+EMAIL_SMTP_FROM=noreply@yourapp.com
+EMAIL_SMTP_USE_TLS=true
 ```
 
 ### Module settings
@@ -400,30 +400,126 @@ Returns:
 | `RETRYING` | Delivery failed, will try again |
 | `FAILED` | Gave up. Check `last_error` for why |
 
-## Extending with custom adapters
+## Writing a custom adapter
 
-Want to send SMS, push notifications, or something else? Create an adapter by subclassing the base adapter class.
+Adapters are pluggable delivery backends. Each adapter handles one channel (`email`, `sms`, `push`, etc.). To add a new delivery method, subclass `BaseOutboundAdapter` and register it through the module context.
+
+### Base classes
+
+#### `SendResult`
+
+Return this from `send()` to tell the framework what happened.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `status` | Yes | `"sent"` or `"failed"` |
+| `message_id` | No | Always set to `messaging_uuid` for database tracking |
+| `error_message` | No | Human-readable error if `status` is `"failed"` |
+| `metadata` | No | Extra provider-specific data |
 
 ```python
-from .context_factory import get_module_context
+# Success
+SendResult(status="sent", message_id=messaging_uuid)
 
-context = get_module_context()
-BaseOutboundAdapter = context.get_service("outbound_base_adapter")
-SendResult = context.get_service("outbound_send_result")
-
-class SMSOutboundAdapter(BaseOutboundAdapter):
-    name = "twilio"
-    channel = "sms"
-
-    async def send(self, messaging_uuid, recipient_id, recipient_contact, metadata=None, subject=None, body=None, content_type="text/plain"):
-        # Your delivery logic here
-        return SendResult(status="sent", message_id="twilio_123")
-
-    async def validate_contact(self, contact):
-        return contact.startswith("+")
+# Failure
+SendResult(status="failed", message_id=messaging_uuid, error_message="Invalid phone number")
 ```
 
-Register it through the module context:
+#### `BaseOutboundAdapter`
+
+```python
+class BaseOutboundAdapter(ABC):
+    name: str = "base"               # Adapter identifier, e.g. "twilio"
+    channel: str = "unknown"         # Channel this adapter handles, e.g. "sms"
+    description: Optional[str] = None # Human-readable description shown in /adapters
+
+    @abstractmethod
+    async def send(
+        self,
+        messaging_uuid: str,           # Unique message ID for tracing
+        recipient_id: str,             # Your internal user/order ID
+        recipient_contact: str,        # Destination (email, phone, etc.)
+        metadata: Optional[dict] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
+        content_type: str = "text/plain",
+    ) -> SendResult: ...
+
+    @abstractmethod
+    async def validate_contact(self, contact: str) -> bool: ...
+
+    async def health_check(self) -> bool:
+        return True
+```
+
+**Method rules:**
+
+- `send()` — Deliver the message. Return `SendResult(status="sent", ...)` on success or `SendResult(status="failed", error_message="...")` on failure. Raising an exception will trigger the retry logic.
+- `validate_contact()` — Return `True` if the contact format is valid for this channel. Called before `send()`.
+- `health_check()` — Return `True` if the adapter is operational. Optional; defaults to `True`.
+
+### Full example: Twilio SMS adapter
+
+```python
+import os
+from twilio.rest import Client
+from .context_factory import get_module_context
+
+BaseOutboundAdapter = get_module_context().get_service("outbound_base_adapter")
+SendResult = get_module_context().get_service("outbound_send_result")
+
+
+class TwilioSMSAdapter(BaseOutboundAdapter):
+    name = "twilio"
+    channel = "sms"
+    description = "Sends SMS via Twilio"
+
+    def __init__(self):
+        self.account_sid = os.environ["TWILIO_ACCOUNT_SID"]
+        self.auth_token = os.environ["TWILIO_AUTH_TOKEN"]
+        self.from_number = os.environ["TWILIO_FROM_NUMBER"]
+        self.client = Client(self.account_sid, self.auth_token)
+
+    async def send(
+        self,
+        messaging_uuid: str,
+        recipient_id: str,
+        recipient_contact: str,
+        metadata=None,
+        subject=None,
+        body=None,
+        content_type="text/plain",
+    ) -> SendResult:
+        try:
+            message = self.client.messages.create(
+                body=body or "",
+                from_=self.from_number,
+                to=recipient_contact,
+            )
+            return SendResult(
+                status="sent",
+                message_id=messaging_uuid,
+                metadata={"twilio_sid": message.sid},
+            )
+        except Exception as exc:
+            return SendResult(
+                status="failed",
+                message_id=messaging_uuid,
+                error_message=str(exc),
+            )
+
+    async def validate_contact(self, contact: str) -> bool:
+        return contact.startswith("+") and len(contact) > 10
+
+    async def health_check(self) -> bool:
+        try:
+            self.client.request("GET", "/2010-04-01/Accounts.json")
+            return True
+        except Exception:
+            return False
+```
+
+### Registering the adapter
 
 ```python
 from .context_factory import get_module_context
@@ -432,11 +528,44 @@ context = get_module_context()
 adapter_registry = context.get_service("outbound_adapter_registry")
 
 adapter_registry.register(
-    adapter=SMSOutboundAdapter(),
+    adapter=TwilioSMSAdapter(),
     channel="sms",
     name="twilio",
     set_default=True,
 )
+```
+
+### Error handling and retries
+
+The retry behavior depends on what your adapter does:
+
+| Behavior | Framework action |
+|----------|-----------------|
+| Return `SendResult(status="sent")` | Mark `SENT`, stop retrying |
+| Return `SendResult(status="failed")` | Mark `FAILED`, stop retrying immediately |
+| Raise `AdapterConfigError` | Mark `FAILED`, stop retrying immediately |
+| Raise retryable exception (network, timeout) | Mark `RETRYING`, wait, try again up to `max_retries` |
+| Raise non-retryable exception (auth, bad number) | Mark `FAILED`, stop retrying immediately |
+
+**Best practice:** Return `SendResult(status="failed", error_message="...")` for permanent failures you want to stop retrying. Raise an exception for transient failures you want the framework to retry.
+
+### Listing adapters
+
+After registration, your adapter appears in `GET /outbound/adapters`:
+
+```bash
+curl http://localhost:8085/outbound/adapters
+```
+
+```json
+{
+  "success": true,
+  "data": [
+    {"name": "console", "channel": "email", "description": "Prints messages to the console for local testing"},
+    {"name": "smtp", "channel": "email", "description": "Sends real emails via SMTP"},
+    {"name": "twilio", "channel": "sms", "description": "Sends SMS via Twilio"}
+  ]
+}
 ```
 
 ## Debugging

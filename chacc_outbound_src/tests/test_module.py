@@ -69,32 +69,32 @@ def test_router_exists():
 
 def test_get_messaging_config_without_context():
     config = get_outbound_config(None)
-    assert config["CHACC_OUTBOUND_EMAIL_BACKEND"] == "console"
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_HOST"] == ""
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_PORT"] == 587
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_FROM"] == "noreply@example.com"
+    assert config["EMAIL_BACKEND"] == "console"
+    assert config["EMAIL_SMTP_HOST"] == ""
+    assert config["EMAIL_SMTP_PORT"] == 587
+    assert config["EMAIL_SMTP_FROM"] == "noreply@example.com"
 
 
 def test_get_messaging_config_with_context():
     class MockContext:
         def get_module_config(self, key, module_name, default=None):
             mapping = {
-                "CHACC_OUTBOUND_EMAIL_BACKEND": "smtp",
-                "CHACC_OUTBOUND_EMAIL_SMTP_HOST": "smtp.example.com",
-                "CHACC_OUTBOUND_EMAIL_SMTP_PORT": "465",
-                "CHACC_OUTBOUND_EMAIL_SMTP_USERNAME": "user",
-                "CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD": "pass",
-                "CHACC_OUTBOUND_EMAIL_SMTP_FROM": "alerts@example.com",
+                "EMAIL_BACKEND": "smtp",
+                "EMAIL_SMTP_HOST": "smtp.example.com",
+                "EMAIL_SMTP_PORT": "465",
+                "EMAIL_SMTP_USERNAME": "user",
+                "EMAIL_SMTP_PASSWORD": "pass",
+                "EMAIL_SMTP_FROM": "alerts@example.com",
             }
             return mapping.get(key, default)
 
     config = get_outbound_config(MockContext())
-    assert config["CHACC_OUTBOUND_EMAIL_BACKEND"] == "smtp"
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_HOST"] == "smtp.example.com"
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_PORT"] == 465
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_USERNAME"] == "user"
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD"] == "pass"
-    assert config["CHACC_OUTBOUND_EMAIL_SMTP_FROM"] == "alerts@example.com"
+    assert config["EMAIL_BACKEND"] == "smtp"
+    assert config["EMAIL_SMTP_HOST"] == "smtp.example.com"
+    assert config["EMAIL_SMTP_PORT"] == 465
+    assert config["EMAIL_SMTP_USERNAME"] == "user"
+    assert config["EMAIL_SMTP_PASSWORD"] == "pass"
+    assert config["EMAIL_SMTP_FROM"] == "alerts@example.com"
 
 
 def test_console_adapter_send_direct():

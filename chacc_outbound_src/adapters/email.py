@@ -29,7 +29,7 @@ class EmailOutboundAdapter(BaseOutboundAdapter):
         if not self.smtp_config:
             raise AdapterConfigError(
                 adapter_name="smtp",
-                reason="SMTP configuration is missing. CHACC_OUTBOUND_EMAIL_BACKEND=smtp requires host, port, username, and password.",
+                reason="SMTP configuration is missing. EMAIL_BACKEND=smtp requires host, port, username, and password.",
             )
 
         if not await self.validate_contact(recipient_contact):

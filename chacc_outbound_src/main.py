@@ -17,7 +17,7 @@ health_router = APIRouter()
 async def health_check():
     context = get_module_context()
     config = get_outbound_config(context)
-    backend = config["CHACC_OUTBOUND_EMAIL_BACKEND"]
+    backend = config.get("EMAIL_BACKEND")
 
     return {
         "status": "healthy",
