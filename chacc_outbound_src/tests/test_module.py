@@ -259,6 +259,46 @@ def test_service_send_returns_serialized_dict():
     assert result["last_error"] is None
 
 
+def test_service_send_adapter_name_overrides_module_mapping_default():
+    """The explicit adapter_name argument to send() must take priority over the
+    module mapping's default_adapter_name — this is the bug fixed in
+    bashirii/fix/adapter-name-override (previously send() silently ignored
+    adapter_name entirely, or errored if a caller passed it as a kwarg)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from ..service import OutboundService
+
+    mock_context = MagicMock()
+    mock_context.get_db.return_value.__aiter__ = lambda self: self
+    mock_context.get_db.return_value.__anext__ = MagicMock(side_effect=StopAsyncIteration)
+
+    service = OutboundService(
+        config=get_outbound_config(None),
+        module_context=mock_context,
+        adapter_registry_service=MagicMock(),
+    )
+
+    mock_mapping = MagicMock()
+    mock_mapping.default_adapter_name = "smtp"
+    service.get_module_mapping = MagicMock(return_value=mock_mapping)
+
+    mock_db = MagicMock()
+
+    with patch.object(service, "_deliver_async", AsyncMock()) as mock_deliver:
+        asyncio.run(
+            service.send(
+                db=mock_db,
+                recipient_id="user_123",
+                recipient_contact="user@example.com",
+                body="Body",
+                module_name="order_service",
+                adapter_name="console",
+            )
+        )
+
+    assert mock_deliver.call_args.kwargs["adapter_name"] == "console"
+
+
 def test_service_rate_limit_without_redis():
     from ..service import OutboundService
     from ..adapters import OutboundAdapterRegistry

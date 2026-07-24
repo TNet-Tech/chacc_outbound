@@ -24,6 +24,7 @@ class SendOutboundRequest(BaseModel):
     channel: str = Field(default="email", description="Channel to use")
     content_type: str = Field(default="text/plain", description="Content type: text/plain for SMS/text, html for HTML email")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
+    adapter_name: Optional[str] = Field(default=None, description="Override the default adapter for this send")
 
     @field_validator("content_type")
     @classmethod

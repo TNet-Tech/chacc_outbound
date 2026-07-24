@@ -37,9 +37,14 @@ class OutboundService:
         metadata: Optional[dict] = None,
         overrides: Optional[dict] = None,
         content_type: str = "text/plain",
+        adapter_name: Optional[str] = None,
     ) -> dict:
         """
         Send a notification and enqueue async delivery.
+
+        `adapter_name` overrides the module's configured default adapter for this
+        one send (e.g. force "console" in a dev/test environment); leave unset to
+        use the module mapping's `default_adapter_name` or the global EMAIL_BACKEND.
 
         Returns a serialized dict representation of the created outbound record,
         so callers don't need to manually serialize ORM attributes.
@@ -53,8 +58,6 @@ class OutboundService:
                 await self.redis.expire(key, 60)
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
-
-        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
 
         outbound_message = Outbound(
             module_name=module_name,
@@ -71,7 +74,11 @@ class OutboundService:
         db.flush()
         db.commit()
 
-        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
+        resolved_adapter_name = (
+            adapter_name
+            or (mapping.default_adapter_name if mapping else None)
+            or self.config.get("EMAIL_BACKEND", "console")
+        )
 
         task = asyncio.create_task(
             self._deliver_async(
