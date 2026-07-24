@@ -38,12 +38,12 @@ def setup_plugin(context: Optional[BackboneContext] = None):
     registry.register(adapter=ConsoleOutboundAdapter(), channel="email", name="console", set_default=True)
 
     smtp_config = {
-        "host": config.get("CHACC_OUTBOUND_EMAIL_SMTP_HOST"),
-        "port": config.get("CHACC_OUTBOUND_EMAIL_SMTP_PORT"),
-        "username": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USERNAME"),
-        "password": config.get("CHACC_OUTBOUND_EMAIL_SMTP_PASSWORD"),
-        "from_email": config.get("CHACC_OUTBOUND_EMAIL_SMTP_FROM"),
-        "use_tls": config.get("CHACC_OUTBOUND_EMAIL_SMTP_USE_TLS", False),
+        "host": config.get("EMAIL_SMTP_HOST"),
+        "port": config.get("EMAIL_SMTP_PORT"),
+        "username": config.get("EMAIL_SMTP_USERNAME"),
+        "password": config.get("EMAIL_SMTP_PASSWORD"),
+        "from_email": config.get("EMAIL_SMTP_FROM"),
+        "use_tls": config.get("EMAIL_SMTP_USE_TLS", False),
     }
     smtp_adapter = EmailOutboundAdapter(smtp_config=smtp_config if smtp_config["host"] else None)
     registry.register(adapter=smtp_adapter, channel="email", name="smtp")

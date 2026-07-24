@@ -54,7 +54,7 @@ class OutboundService:
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
 
-        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("CHACC_OUTBOUND_EMAIL_BACKEND", "console")
+        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
 
         outbound_message = Outbound(
             module_name=module_name,
@@ -71,7 +71,7 @@ class OutboundService:
         db.flush()
         db.commit()
 
-        resolved_adapter_name = mapping.default_adapter_name or self.config.get("CHACC_OUTBOUND_EMAIL_BACKEND", "console")
+        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
 
         task = asyncio.create_task(
             self._deliver_async(
@@ -137,7 +137,7 @@ class OutboundService:
             max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
             backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
 
-            effective_adapter_name = adapter_name or (mapping.default_adapter_name if mapping else self.config.get("EMAIL_BACKEND", "console")) or "console"
+            effective_adapter_name = adapter_name
             logger.info("Delivering outbound %s via adapter=%s retries=%s backoff=%s", messaging_uuid, effective_adapter_name, max_retries, backoff)
             try:
                 adapter = self.adapter_registry_service.get(
