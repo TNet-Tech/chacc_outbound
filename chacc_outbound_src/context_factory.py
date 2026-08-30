@@ -1,5 +1,7 @@
 from typing import Optional
 
+from fastapi import HTTPException
+
 from .service import OutboundService
 from .config import get_outbound_config
 
@@ -30,6 +32,23 @@ async def get_db():
             yield db
     else:
         raise RuntimeError("Database not available")
+
+async def get_async_db():
+    """Get async database session from module context.
+
+    Delegates to the backbone's get_async_db which handles session lifecycle
+    (creation, rollback on exception, cleanup).
+    """
+    context = get_module_context()
+    if context is None:
+        raise HTTPException(status_code=500, detail="Module not initialized")
+    
+    gen = context.get_db_async()
+    db = await anext(gen)
+    try:
+        yield db
+    finally:
+        await gen.aclose()
 
 
 def get_outbound_service():

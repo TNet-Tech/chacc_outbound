@@ -126,7 +126,7 @@ class OutboundService:
                 logger.warning("No module_context available; cannot deliver outbound message %s", messaging_uuid)
                 return
 
-            messaging = db.execute(
+            messaging = await db.execute(
                 select(Outbound).where(Outbound.uuid == messaging_uuid)
             ).scalar_one_or_none()
             if not messaging:
@@ -239,7 +239,7 @@ class OutboundService:
             logger.error("Outbound delivery failed for %s: %s", messaging_uuid, e, exc_info=True)
             if db:
                 try:
-                    messaging = db.execute(
+                    messaging = await db.execute(
                         select(Outbound).where(Outbound.uuid == messaging_uuid)
                     ).scalar_one_or_none()
                     if messaging:
