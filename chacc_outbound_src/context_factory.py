@@ -48,15 +48,16 @@ async def get_current_user(
         credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ):
     context = get_module_context()
-    get_current_user_func = context.get_service("get_current_user") if context else None
+
+    if context is None:
+        return None
+
+    get_current_user_func = context.get_service("get_current_user")
 
     if get_current_user_func:
-        return await get_current_user_func(credentials)
-
-    raise RuntimeError("Current user retrieval function not available")
-
-
-async def require_current_user(current_user=Depends(get_current_user)):
-    if current_user is None:
-        raise HTTPException(status_code=401, detail="Unauthorized: No current user found")
-    return current_user
+        current_user = await get_current_user_func(credentials)
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Unauthorized: No current user found")
+        return current_user
+    
+    return None
