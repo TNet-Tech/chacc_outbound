@@ -57,7 +57,7 @@ async def get_current_user(
     if get_current_user_func:
         current_user = await get_current_user_func(credentials)
         if not current_user:
-            raise HTTPException(status_code=401, detail="Unauthorized: No current user found")
+            raise HTTPException(status_code=401, detail="User not authenticated")
         return current_user
     
     return None
