@@ -203,7 +203,7 @@ async def get_outbound(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    outbound = await service.get_message(db, outbound_uuid)
+    outbound = service.get_message(db, outbound_uuid)
     if not outbound:
         raise HTTPException(status_code=404, detail="Message not found")
     return _serialize_outbound(outbound)
