@@ -130,13 +130,10 @@ async def send_outbound(
             module_name=payload.module_name,
             subject=payload.subject,
             channel=payload.channel,
-            adapter_name=payload.adapter_name,
             metadata=payload.metadata,
             content_type=payload.content_type,
         )
     except AdapterNotFoundError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
