@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any, Generic, TypeVar
+from uuid import UUID
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
@@ -198,12 +199,13 @@ async def list_outbounds(
 
 @router.get("/messages/{outbound_uuid}", response_model=OutboundResponse)
 async def get_outbound(
-    outbound_uuid: str,
+    outbound_uuid: UUID,
     service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    outbound = service.get_message(db, outbound_uuid)
+    outbound_uuid_str = str(outbound_uuid)
+    outbound = service.get_message(db, outbound_uuid_str)
     if not outbound:
         raise HTTPException(status_code=404, detail="Message not found")
     return _serialize_outbound(outbound)
@@ -211,15 +213,16 @@ async def get_outbound(
 
 @router.get("/messages/{outbound_uuid}/status")
 async def get_outbound_message_status(
-    outbound_uuid: str,
+    outbound_uuid: UUID,
     service: OutboundService = Depends(get_outbound_service),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    status = service.get_status(db, outbound_uuid)
+    outbound_uuid_str = str(outbound_uuid)
+    status = service.get_status(db, outbound_uuid_str)
     if status is None:
         raise HTTPException(status_code=404, detail="Outbound Message not found")
-    return {"uuid": outbound_uuid, "status": status}
+    return {"uuid": outbound_uuid_str, "status": status}
 
 
 @router.get("/module-mappings", response_model=BaseResponseModel[ModuleMappingResponse])
