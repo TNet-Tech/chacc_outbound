@@ -242,7 +242,6 @@ def test_service_send_returns_serialized_dict():
             module_name="order_service",
             subject="Direct subject",
             channel="email",
-            adapter_name="console",
             content_type="text/plain",
         )
     )
