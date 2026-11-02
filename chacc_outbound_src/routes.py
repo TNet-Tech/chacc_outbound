@@ -1,15 +1,15 @@
+from typing import Any, Generic, TypeVar
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from typing import Optional, List, Dict, Any, Generic, TypeVar
 from uuid import UUID
-from sqlalchemy import select, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from .context_factory import get_db, get_outbound_service, get_current_user
+from .context_factory import get_async_db, get_current_user, get_outbound_service
+from .exceptions import AdapterNotFoundError
 from .models import Outbound, OutboundModuleMapping
 from .service import OutboundService
-from .exceptions import AdapterNotFoundError
-
 
 router = APIRouter()
 
@@ -20,11 +20,19 @@ class SendOutboundRequest(BaseModel):
     module_name: str = Field(..., description="Module name sending the notification")
     recipient_id: str = Field(..., description="User/entity identifier")
     recipient_contact: str = Field(..., description="Email address or phone number")
-    subject: Optional[str] = Field(default=None, description="Message subject (required for email, ignored for SMS)")
+    subject: str | None = Field(
+        default=None,
+        description="Message subject (required for email, ignored for SMS)",
+    )
     body: str = Field(..., description="Message body content")
     channel: str = Field(default="email", description="Channel to use")
-    content_type: str = Field(default="text/plain", description="Content type: text/plain for SMS/text, html for HTML email")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Module-specific tracking data")
+    content_type: str = Field(
+        default="text/plain",
+        description="Content type: text/plain for SMS/text, html for HTML email",
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None, description="Module-specific tracking data"
+    )
 
     @field_validator("content_type")
     @classmethod
@@ -41,38 +49,52 @@ class OutboundResponse(BaseModel):
     module_name: str
     recipient_id: str
     channel: str
-    subject: Optional[str]
+    subject: str | None
     body: str
     recipient_contact: str
-    outbound_metadata: Optional[dict]
+    outbound_metadata: dict | None
     status: str
-    sent_at: Optional[str]
+    sent_at: str | None
     attempts: int
-    last_error: Optional[str]
+    last_error: str | None
 
 
 class ModuleMappingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     module_name: str
-    default_adapter_name: Optional[str]
-    default_channel: Optional[str]
-    max_retry_attempts: Optional[int]
-    retry_backoff_seconds: Optional[int]
-    rate_limit_per_minute: Optional[int]
-    is_active: Optional[bool]
-    description: Optional[str]
+    default_adapter_name: str | None
+    default_channel: str | None
+    max_retry_attempts: int | None
+    retry_backoff_seconds: int | None
+    rate_limit_per_minute: int | None
+    is_active: bool | None
+    description: str | None
 
 
 class CreateModuleMappingRequest(BaseModel):
     module_name: str = Field(..., description="Module name this mapping applies to")
-    default_adapter_name: Optional[str] = Field(default=None, description="Default adapter for this module")
-    default_channel: Optional[str] = Field(default=None, description="Default channel for this module")
-    max_retry_attempts: Optional[int] = Field(default=None, ge=1, description="Max retry attempts")
-    retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, description="Initial backoff seconds between retries")
-    rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, description="Max sends per minute")
-    is_active: Optional[bool] = Field(default=None, description="Whether this module is active")
-    description: Optional[str] = Field(default=None, description="Human-readable description")
+    default_adapter_name: str | None = Field(
+        default=None, description="Default adapter for this module"
+    )
+    default_channel: str | None = Field(
+        default=None, description="Default channel for this module"
+    )
+    max_retry_attempts: int | None = Field(
+        default=None, ge=1, description="Max retry attempts"
+    )
+    retry_backoff_seconds: int | None = Field(
+        default=None, ge=0, description="Initial backoff seconds between retries"
+    )
+    rate_limit_per_minute: int | None = Field(
+        default=None, ge=1, description="Max sends per minute"
+    )
+    is_active: bool | None = Field(
+        default=None, description="Whether this module is active"
+    )
+    description: str | None = Field(
+        default=None, description="Human-readable description"
+    )
 
 
 class Pager(BaseModel):
@@ -84,9 +106,9 @@ class Pager(BaseModel):
 class BaseResponseModel(BaseModel, Generic[T]):
     success: bool = True
     message: str = ""
-    data: List[T]
-    total: Optional[int] = None
-    pager: Optional[Pager] = None
+    data: list[T]
+    total: int | None = None
+    pager: Pager | None = None
 
     class Config:
         from_attributes = True
@@ -119,12 +141,10 @@ def _serialize_outbound(n) -> OutboundResponse:
 async def send_outbound(
     payload: SendOutboundRequest,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     try:
         return await service.send(
-            db=db,
             recipient_id=payload.recipient_id,
             recipient_contact=payload.recipient_contact,
             body=payload.body,
@@ -141,13 +161,16 @@ async def send_outbound(
 @router.get("/messages", response_model=BaseResponseModel[OutboundResponse])
 async def list_outbounds(
     params: PaginationParams = Depends(),
-    module_name: Optional[str] = Query(None, description="Filter by module name"),
-    channel: Optional[str] = Query(None, description="Filter by channel"),
-    status: Optional[str] = Query(None, description="Filter by status"),
-    search: str = Query("", description="Search by uuid, module_name, recipient_contact, subject, or body"),
+    module_name: str | None = Query(None, description="Filter by module name"),
+    channel: str | None = Query(None, description="Filter by channel"),
+    status: str | None = Query(None, description="Filter by status"),
+    search: str = Query(
+        "",
+        description="Search by uuid, module_name, recipient_contact, subject, or body",
+    ),
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    db: AsyncSession = Depends(get_async_db),
+    current_user: dict = Depends(get_current_user),
 ):
     stmt = select(Outbound)
     if module_name:
@@ -170,7 +193,7 @@ async def list_outbounds(
     stmt = stmt.order_by(Outbound.created_at.desc())
 
     if not params.paging:
-        result = db.execute(stmt)
+        result = await db.execute(stmt)
         items = result.scalars().all()
         return BaseResponseModel(
             success=True,
@@ -180,8 +203,11 @@ async def list_outbounds(
             pager=None,
         )
 
-    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
-    paginated = db.execute(stmt.offset((params.page - 1) * params.size).limit(params.size))
+    total_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = total_result.scalar() or 0
+    paginated = await db.execute(
+        stmt.offset((params.page - 1) * params.size).limit(params.size)
+    )
     items = paginated.scalars().all()
     pages = (total + params.size - 1) // params.size if params.size else 1
 
@@ -198,11 +224,11 @@ async def list_outbounds(
 async def get_outbound(
     outbound_uuid: UUID,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    db: AsyncSession = Depends(get_async_db),
+    current_user: dict = Depends(get_current_user),
 ):
     outbound_uuid_str = str(outbound_uuid)
-    outbound = service.get_message(db, outbound_uuid_str)
+    outbound = await service.get_message(db, outbound_uuid_str)
     if not outbound:
         raise HTTPException(status_code=404, detail="Message not found")
     return _serialize_outbound(outbound)
@@ -212,11 +238,11 @@ async def get_outbound(
 async def get_outbound_message_status(
     outbound_uuid: UUID,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    db: AsyncSession = Depends(get_async_db),
+    current_user: dict = Depends(get_current_user),
 ):
     outbound_uuid_str = str(outbound_uuid)
-    status = service.get_status(db, outbound_uuid_str)
+    status = await service.get_status(db, outbound_uuid_str)
     if status is None:
         raise HTTPException(status_code=404, detail="Outbound Message not found")
     return {"uuid": outbound_uuid_str, "status": status}
@@ -225,10 +251,10 @@ async def get_outbound_message_status(
 @router.get("/module-mappings", response_model=BaseResponseModel[ModuleMappingResponse])
 async def list_module_mappings(
     params: PaginationParams = Depends(),
-    module_name: Optional[str] = Query(None, description="Filter by module name"),
+    module_name: str | None = Query(None, description="Filter by module name"),
     current_user: dict = Depends(get_current_user),
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
 ):
     stmt = select(OutboundModuleMapping)
     if module_name:
@@ -236,7 +262,7 @@ async def list_module_mappings(
     stmt = stmt.order_by(OutboundModuleMapping.module_name)
 
     if not params.paging:
-        result = db.execute(stmt)
+        result = await db.execute(stmt)
         items = result.scalars().all()
         return BaseResponseModel(
             success=True,
@@ -246,8 +272,11 @@ async def list_module_mappings(
             pager=None,
         )
 
-    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
-    paginated = db.execute(stmt.offset((params.page - 1) * params.size).limit(params.size))
+    total_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = total_result.scalar() or 0
+    paginated = await db.execute(
+        stmt.offset((params.page - 1) * params.size).limit(params.size)
+    )
     items = paginated.scalars().all()
     pages = (total + params.size - 1) // params.size if params.size else 1
 
@@ -273,10 +302,10 @@ async def list_adapters(
 async def get_module_mapping(
     module_name: str,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     current_user: dict = Depends(get_current_user),
 ):
-    mapping = service.get_module_mapping(db, module_name)
+    mapping = await service.get_module_mapping(db, module_name)
     if not mapping:
         raise HTTPException(status_code=404, detail="Module mapping not found")
     return mapping
@@ -286,10 +315,10 @@ async def get_module_mapping(
 async def create_module_mapping(
     payload: CreateModuleMappingRequest,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     current_user: dict = Depends(get_current_user),
 ):
-    mapping = service._create_or_update_module_mapping(
+    mapping = await service._create_or_update_module_mapping(
         db=db,
         module_name=payload.module_name,
         default_adapter_name=payload.default_adapter_name,
@@ -300,8 +329,8 @@ async def create_module_mapping(
         is_active=payload.is_active,
         description=payload.description,
     )
-    db.commit()
-    db.refresh(mapping)
+    await db.commit()
+    await db.refresh(mapping)
     return mapping
 
 
@@ -310,14 +339,14 @@ async def update_module_mapping(
     module_name: str,
     payload: CreateModuleMappingRequest,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     current_user: dict = Depends(get_current_user),
 ):
-    existing = service.get_module_mapping(db, module_name)
+    existing = await service.get_module_mapping(db, module_name)
     if not existing:
         raise HTTPException(status_code=404, detail="Module mapping not found")
 
-    mapping = service._create_or_update_module_mapping(
+    mapping = await service._create_or_update_module_mapping(
         db=db,
         module_name=module_name,
         default_adapter_name=payload.default_adapter_name,
@@ -328,8 +357,8 @@ async def update_module_mapping(
         is_active=payload.is_active,
         description=payload.description,
     )
-    db.commit()
-    db.refresh(mapping)
+    await db.commit()
+    await db.refresh(mapping)
     return mapping
 
 
@@ -337,12 +366,12 @@ async def update_module_mapping(
 async def delete_module_mapping(
     module_name: str,
     service: OutboundService = Depends(get_outbound_service),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     current_user: dict = Depends(get_current_user),
 ):
-    mapping = service.get_module_mapping(db, module_name)
+    mapping = await service.get_module_mapping(db, module_name)
     if not mapping:
         raise HTTPException(status_code=404, detail="Module mapping not found")
-    db.delete(mapping)
-    db.commit()
+    await db.delete(mapping)
+    await db.commit()
     return {"success": True, "message": f"Module mapping '{module_name}' deleted"}

@@ -193,22 +193,19 @@ Everything is accessed through the module context. No imports from `chacc_outbou
 ### Send a message
 
 ```python
-from .context_factory import get_module_context, get_db
+from .context_factory import get_module_context
 
 context = get_module_context()
 outbound_service = context.get_service("outbound_service")
 
-async for db in get_db():
-    result = await outbound_service.send(
-        db=db,
-        recipient_id="cust_123",
-        recipient_contact="customer@example.com",
-        subject="Your order has shipped",
-        body="Your order ORD-001 has shipped. Tracking: TRK-456",
-        module_name="order_service",
-        channel="email",
-    )
-    await db.commit()
+result = await outbound_service.send(
+  recipient_id="cust_123",
+  recipient_contact="customer@example.com",
+  subject="Your order has shipped",
+  body="Your order ORD-001 has shipped. Tracking: TRK-456",
+  module_name="order_service",
+  channel="email",
+)
 ```
 
 The `result` is a dictionary with the message UUID and current status. Since delivery happens in the background, the status may still be `PENDING` at this point — it updates shortly after.
@@ -229,13 +226,13 @@ The `result` is a dictionary with the message UUID and current status. Since del
 ### Check message status
 
 ```python
-from .context_factory import get_module_context, get_db
+from .context_factory import get_module_context, get_async_db
 
 context = get_module_context()
 outbound_service = context.get_service("outbound_service")
 
-async for db in get_db():
-    status = outbound_service.get_status(db, message_uuid)
+async for db in get_async_db():
+  status = await outbound_service.get_status(db, message_uuid)
 ```
 
 ## REST API
