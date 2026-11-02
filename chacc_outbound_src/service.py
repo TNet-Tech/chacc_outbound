@@ -158,12 +158,12 @@ class OutboundService:
                     "metadata": messaging.messaging_metadata,
                 }
                 mapping = await self.get_module_mapping(db, message["module_name"])
-            max_retries = self._apply_overrides(
-                mapping, "max_retry_attempts", 3, overrides
-            )
-            backoff = self._apply_overrides(
-                mapping, "retry_backoff_seconds", 300, overrides
-            )
+                max_retries = self._apply_overrides(
+                    mapping, "max_retry_attempts", 3, overrides
+                )
+                backoff = self._apply_overrides(
+                    mapping, "retry_backoff_seconds", 300, overrides
+                )
 
             effective_adapter_name = adapter_name
             logger.info(
