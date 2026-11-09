@@ -138,6 +138,18 @@ class OutboundService:
                     "No module_context available; cannot deliver outbound message %s",
                     messaging_uuid,
                 )
+            if context:
+                db_gen = context.get_db()
+                db = await db_gen.__anext__()
+            else:
+                logger.warning("No module_context available; cannot deliver outbound message %s", messaging_uuid)
+                return
+
+            messaging = db.execute(
+                select(Outbound).where(Outbound.uuid == messaging_uuid)
+            ).scalar_one_or_none()
+            if not messaging:
+                logger.warning("Outbound message %s not found in database", messaging_uuid)
                 return
 
             async with self._database_session() as db:
