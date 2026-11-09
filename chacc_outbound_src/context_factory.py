@@ -29,14 +29,6 @@ def get_module_context():
     return _module_context
 
 
-async def get_db():
-    context = get_module_context()
-    if context and hasattr(context, "get_db"):
-        async for db in context.get_db():
-            yield db
-    else:
-        raise RuntimeError("Database not available")
-
 async def get_async_db():
     """Get async database session from module context.
 

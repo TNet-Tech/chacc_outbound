@@ -1,12 +1,19 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional
-from sqlalchemy import select
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-from .models import Outbound, OutboundModuleMapping, OutboundStatus
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from .adapter_service import OutboundAdapterRegistryService
-from .exceptions import RETRYABLE_EXCEPTIONS, NON_RETRYABLE_EXCEPTIONS, AdapterConfigError, AdapterNotFoundError
+from .exceptions import (
+    NON_RETRYABLE_EXCEPTIONS,
+    RETRYABLE_EXCEPTIONS,
+    AdapterConfigError,
+    AdapterNotFoundError,
+)
+from .models import Outbound, OutboundModuleMapping, OutboundStatus
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +23,7 @@ class OutboundService:
         self,
         config: dict,
         module_context=None,
-        adapter_registry_service: Optional[OutboundAdapterRegistryService] = None,
+        adapter_registry_service: OutboundAdapterRegistryService | None = None,
         redis=None,
     ):
         self.adapter_registry_service = adapter_registry_service
@@ -27,15 +34,14 @@ class OutboundService:
 
     async def send(
         self,
-        db,
         recipient_id: str,
         recipient_contact: str,
         body: str,
         module_name: str,
-        subject: Optional[str] = None,
+        subject: str | None = None,
         channel: str = "email",
-        metadata: Optional[dict] = None,
-        overrides: Optional[dict] = None,
+        metadata: dict | None = None,
+        overrides: dict | None = None,
         content_type: str = "text/plain",
     ) -> dict:
         """
@@ -44,8 +50,15 @@ class OutboundService:
         Returns a serialized dict representation of the created outbound record,
         so callers don't need to manually serialize ORM attributes.
         """
-        mapping = self.get_module_mapping(db, module_name)
-        rate_limit = self._apply_overrides(mapping, "rate_limit_per_minute", None, overrides)
+        async with self._database_session() as session:
+            mapping = await self.get_module_mapping(session, module_name)
+            rate_limit = self._apply_overrides(
+                mapping, "rate_limit_per_minute", None, overrides
+            )
+            resolved_adapter_name = (
+                mapping.default_adapter_name if mapping else None
+            ) or self.config.get("EMAIL_BACKEND", "console")
+
         if rate_limit and self.redis:
             key = f"messaging:rate:{module_name}:{channel}"
             current = await self.redis.incr(key)
@@ -53,8 +66,6 @@ class OutboundService:
                 await self.redis.expire(key, 60)
             if current > rate_limit:
                 raise AdapterNotFoundError(channel, f"rate_limit_exceeded:{rate_limit}")
-
-        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
 
         outbound_message = Outbound(
             module_name=module_name,
@@ -67,11 +78,11 @@ class OutboundService:
             status=OutboundStatus.PENDING,
             attempts=0,
         )
-        db.add(outbound_message)
-        db.flush()
-        db.commit()
-
-        resolved_adapter_name = (mapping.default_adapter_name if mapping else None) or self.config.get("EMAIL_BACKEND", "console")
+        async with self._database_session() as session:
+            session.add(outbound_message)
+            await session.flush()
+            await session.commit()
+            serialized_message = self._serialize_outbound(outbound_message)
 
         task = asyncio.create_task(
             self._deliver_async(
@@ -86,11 +97,16 @@ class OutboundService:
         def _on_task_done(t):
             self._tasks.discard(t)
             if t.exception():
-                logger.error("Background delivery task failed for %s: %s", outbound_message.uuid, t.exception(), exc_info=t.exception())
+                logger.error(
+                    "Background delivery task failed for %s: %s",
+                    outbound_message.uuid,
+                    t.exception(),
+                    exc_info=t.exception(),
+                )
 
         task.add_done_callback(_on_task_done)
 
-        return self._serialize_outbound(outbound_message)
+        return serialized_message
 
     def _serialize_outbound(self, n) -> dict:
         return {
@@ -111,14 +127,17 @@ class OutboundService:
     async def _deliver_async(
         self,
         messaging_uuid: str,
-        adapter_name: Optional[str] = None,
-        overrides: Optional[dict] = None,
+        adapter_name: str | None = None,
+        overrides: dict | None = None,
         content_type: str = "text/plain",
     ) -> None:
         context = self.module_context
-        db = None
-        db_gen = None
         try:
+            if context is None:
+                logger.warning(
+                    "No module_context available; cannot deliver outbound message %s",
+                    messaging_uuid,
+                )
             if context:
                 db_gen = context.get_db()
                 db = await db_gen.__anext__()
@@ -133,12 +152,39 @@ class OutboundService:
                 logger.warning("Outbound message %s not found in database", messaging_uuid)
                 return
 
-            mapping = self.get_module_mapping(db, messaging.module_name)
-            max_retries = self._apply_overrides(mapping, "max_retry_attempts", 3, overrides)
-            backoff = self._apply_overrides(mapping, "retry_backoff_seconds", 300, overrides)
+            async with self._database_session() as db:
+                messaging = await self.get_message(db, messaging_uuid)
+                if messaging is None:
+                    logger.warning(
+                        "Outbound message %s not found in database", messaging_uuid
+                    )
+                    return
+                message = {
+                    "uuid": str(messaging.uuid),
+                    "module_name": messaging.module_name,
+                    "channel": messaging.channel,
+                    "recipient_id": messaging.recipient_id,
+                    "recipient_contact": messaging.recipient_contact,
+                    "subject": messaging.subject,
+                    "body": messaging.body,
+                    "metadata": messaging.messaging_metadata,
+                }
+                mapping = await self.get_module_mapping(db, message["module_name"])
+                max_retries = self._apply_overrides(
+                    mapping, "max_retry_attempts", 3, overrides
+                )
+                backoff = self._apply_overrides(
+                    mapping, "retry_backoff_seconds", 300, overrides
+                )
 
             effective_adapter_name = adapter_name
-            logger.info("Delivering outbound %s via adapter=%s retries=%s backoff=%s", messaging_uuid, effective_adapter_name, max_retries, backoff)
+            logger.info(
+                "Delivering outbound %s via adapter=%s retries=%s backoff=%s",
+                messaging_uuid,
+                effective_adapter_name,
+                max_retries,
+                backoff,
+            )
             try:
                 adapter = self.adapter_registry_service.get(
                     channel=messaging.channel,
@@ -146,142 +192,201 @@ class OutboundService:
                 )
             except AdapterNotFoundError as e:
                 logger.error("Adapter not found for outbound %s: %s", messaging_uuid, e)
-                messaging.status = OutboundStatus.FAILED
-                messaging.last_error = str(e)
-                db.flush()
-                db.commit()
+                await self._update_message(
+                    messaging_uuid,
+                    status=OutboundStatus.FAILED,
+                    last_error=str(e),
+                )
                 return
 
             last_error = None
             for attempt in range(1, max_retries + 1):
                 try:
                     result = await adapter.send(
-                        messaging_uuid=str(messaging.uuid),
-                        recipient_id=messaging.recipient_id,
-                        recipient_contact=messaging.recipient_contact,
-                        metadata=messaging.messaging_metadata,
-                        subject=messaging.subject,
-                        body=messaging.body,
+                        messaging_uuid=message["uuid"],
+                        recipient_id=message["recipient_id"],
+                        recipient_contact=message["recipient_contact"],
+                        metadata=message["metadata"],
+                        subject=message["subject"],
+                        body=message["body"],
                         content_type=content_type,
                     )
 
                     if result.status == "sent":
-                        logger.info("Adapter reported SENT for outbound %s", messaging_uuid)
-                        messaging.status = OutboundStatus.SENT
-                        messaging.sent_at = datetime.now(timezone.utc)
-                        messaging.attempts = attempt
+                        logger.info(
+                            "Adapter reported SENT for outbound %s", messaging_uuid
+                        )
+                        updates = {
+                            "status": OutboundStatus.SENT,
+                            "sent_at": datetime.now(UTC),
+                            "attempts": attempt,
+                        }
                         if result.error_message:
-                            messaging.last_error = result.error_message
-                        db.flush()
-                        db.commit()
+                            updates["last_error"] = result.error_message
+                        await self._update_message(messaging_uuid, **updates)
                         logger.info("Outbound %s marked as SENT in DB", messaging_uuid)
                         return
 
                     if result.status == "failed":
-                        logger.warning("Adapter reported FAILED for outbound %s: %s", messaging_uuid, result.error_message)
-                        messaging.status = OutboundStatus.FAILED
-                        messaging.last_error = result.error_message or "Adapter reported failure"
-                        messaging.attempts = attempt
-                        db.flush()
-                        db.commit()
-                        logger.info("Outbound %s marked as FAILED in DB", messaging_uuid)
+                        logger.warning(
+                            "Adapter reported FAILED for outbound %s: %s",
+                            messaging_uuid,
+                            result.error_message,
+                        )
+                        await self._update_message(
+                            messaging_uuid,
+                            status=OutboundStatus.FAILED,
+                            last_error=result.error_message
+                            or "Adapter reported failure",
+                            attempts=attempt,
+                        )
+                        logger.info(
+                            "Outbound %s marked as FAILED in DB", messaging_uuid
+                        )
                         return
 
                     last_error = result.error_message or "Unknown error"
-                    messaging.status = OutboundStatus.RETRYING
-                    messaging.last_error = last_error
-                    messaging.attempts = attempt
-                    db.flush()
-                    db.commit()
+                    await self._update_message(
+                        messaging_uuid,
+                        status=OutboundStatus.RETRYING,
+                        last_error=last_error,
+                        attempts=attempt,
+                    )
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
 
                 except AdapterConfigError as e:
-                    logger.error("Adapter config error for outbound %s: %s", messaging_uuid, e)
-                    messaging.status = OutboundStatus.FAILED
-                    messaging.last_error = str(e)
-                    messaging.attempts = attempt
-                    db.flush()
-                    db.commit()
+                    logger.error(
+                        "Adapter config error for outbound %s: %s", messaging_uuid, e
+                    )
+                    await self._update_message(
+                        messaging_uuid,
+                        status=OutboundStatus.FAILED,
+                        last_error=str(e),
+                        attempts=attempt,
+                    )
                     return
 
                 except RETRYABLE_EXCEPTIONS as e:
                     last_error = str(e)
-                    logger.warning("Retryable error for outbound %s (attempt %s): %s", messaging_uuid, attempt, e)
-                    messaging.status = OutboundStatus.RETRYING
-                    messaging.last_error = last_error
-                    messaging.attempts = attempt
-                    db.flush()
-                    db.commit()
+                    logger.warning(
+                        "Retryable error for outbound %s (attempt %s): %s",
+                        messaging_uuid,
+                        attempt,
+                        e,
+                    )
+                    await self._update_message(
+                        messaging_uuid,
+                        status=OutboundStatus.RETRYING,
+                        last_error=last_error,
+                        attempts=attempt,
+                    )
 
                     if attempt < max_retries:
                         await asyncio.sleep(backoff)
                         backoff = backoff * 2
 
                 except NON_RETRYABLE_EXCEPTIONS as e:
-                    logger.error("Non-retryable error for outbound %s: %s", messaging_uuid, e)
-                    messaging.status = OutboundStatus.FAILED
-                    messaging.last_error = str(e)
-                    messaging.attempts = attempt
-                    db.flush()
-                    db.commit()
+                    logger.error(
+                        "Non-retryable error for outbound %s: %s", messaging_uuid, e
+                    )
+                    await self._update_message(
+                        messaging_uuid,
+                        status=OutboundStatus.FAILED,
+                        last_error=str(e),
+                        attempts=attempt,
+                    )
                     return
 
-            logger.warning("Outbound %s failed after %s retries", messaging_uuid, max_retries)
-            messaging.status = OutboundStatus.FAILED
-            messaging.last_error = last_error or "Max retries exceeded"
-            db.flush()
-            db.commit()
+            logger.warning(
+                "Outbound %s failed after %s retries", messaging_uuid, max_retries
+            )
+            await self._update_message(
+                messaging_uuid,
+                status=OutboundStatus.FAILED,
+                last_error=last_error or "Max retries exceeded",
+            )
 
         except Exception as e:
-            logger.error("Outbound delivery failed for %s: %s", messaging_uuid, e, exc_info=True)
-            if db:
+            logger.error(
+                "Outbound delivery failed for %s: %s", messaging_uuid, e, exc_info=True
+            )
+            try:
+                await self._update_message(
+                    messaging_uuid,
+                    status=OutboundStatus.FAILED,
+                    last_error=str(e),
+                )
+            except Exception as inner_e:
+                logger.error(
+                    "Failed to mark outbound %s as FAILED: %s",
+                    messaging_uuid,
+                    inner_e,
+                    exc_info=True,
+                )
+
+    @asynccontextmanager
+    async def _database_session(self):
+        context = self.module_context
+        if context is None:
+            raise RuntimeError("Database context is not available")
+        db_generator = context.get_db_async()
+        db = None
+        try:
+            db = await anext(db_generator)
+            yield db
+        except BaseException:
+            if db is not None:
                 try:
-                    messaging = db.execute(
-                        select(Outbound).where(Outbound.uuid == messaging_uuid)
-                    ).scalar_one_or_none()
-                    if messaging:
-                        messaging.status = OutboundStatus.FAILED
-                        messaging.last_error = str(e)
-                        db.flush()
-                        db.commit()
-                except Exception as inner_e:
-                    logger.error("Failed to mark outbound %s as FAILED: %s", messaging_uuid, inner_e, exc_info=True)
+                    await db.rollback()
+                except Exception:
+                    logger.exception("Failed to roll back outbound database session")
+            raise
         finally:
-            if db_gen is not None:
-                try:
-                    await db_gen.aclose()
-                except Exception:
-                    pass
-            if db:
-                try:
-                    db.close()
-                except Exception:
-                    pass
+            await db_generator.aclose()
+
+    async def _update_message(self, messaging_uuid: str, **updates) -> bool:
+        async with self._database_session() as db:
+            messaging = await self.get_message(db, messaging_uuid)
+            if messaging is None:
+                logger.warning(
+                    "Outbound message %s not found while updating status",
+                    messaging_uuid,
+                )
+                return False
+            for field, value in updates.items():
+                setattr(messaging, field, value)
+            await db.flush()
+            await db.commit()
+            return True
 
     def _apply_overrides(
         self,
-        mapping: Optional[OutboundModuleMapping],
+        mapping: OutboundModuleMapping | None,
         key: str,
-        default: Optional[int],
-        overrides: Optional[dict],
-    ) -> Optional[int]:
+        default: int | None,
+        overrides: dict | None,
+    ) -> int | None:
         if overrides and key in overrides:
             return overrides[key]
         if mapping and hasattr(mapping, key) and getattr(mapping, key) is not None:
             return getattr(mapping, key)
         return default
 
-    def get_message(self, db, outbound_messaging_uuid: str) -> Optional[Outbound]:
-        result = db.execute(
+    async def get_message(
+        self, db: AsyncSession, outbound_messaging_uuid: str
+    ) -> Outbound | None:
+        result = await db.execute(
             select(Outbound).where(Outbound.uuid == outbound_messaging_uuid)
         )
         return result.scalar_one_or_none()
 
-    def get_status(self, db, outbound_messaging_uuid: str) -> Optional[str]:
-        message = self.get_message(db, outbound_messaging_uuid)
+    async def get_status(
+        self, db: AsyncSession, outbound_messaging_uuid: str
+    ) -> str | None:
+        message = await self.get_message(db, outbound_messaging_uuid)
         if message:
             status = message.status
             if hasattr(status, "value"):
@@ -289,27 +394,29 @@ class OutboundService:
             return str(status)
         return None
 
-    def get_module_mapping(self, db, module_name: str) -> Optional[OutboundModuleMapping]:
-        result = db.execute(
+    async def get_module_mapping(
+        self, db: AsyncSession, module_name: str
+    ) -> OutboundModuleMapping | None:
+        result = await db.execute(
             select(OutboundModuleMapping).where(
                 OutboundModuleMapping.module_name == module_name
             )
         )
         return result.scalar_one_or_none()
 
-    def _create_or_update_module_mapping(
+    async def _create_or_update_module_mapping(
         self,
-        db,
+        db: AsyncSession,
         module_name: str,
-        default_adapter_name: Optional[str] = None,
-        default_channel: Optional[str] = None,
-        max_retry_attempts: Optional[int] = None,
-        retry_backoff_seconds: Optional[int] = None,
-        rate_limit_per_minute: Optional[int] = None,
-        is_active: Optional[bool] = None,
-        description: Optional[str] = None,
+        default_adapter_name: str | None = None,
+        default_channel: str | None = None,
+        max_retry_attempts: int | None = None,
+        retry_backoff_seconds: int | None = None,
+        rate_limit_per_minute: int | None = None,
+        is_active: bool | None = None,
+        description: str | None = None,
     ) -> OutboundModuleMapping:
-        mapping = self.get_module_mapping(db, module_name)
+        mapping = await self.get_module_mapping(db, module_name)
         if mapping:
             if default_adapter_name is not None:
                 mapping.default_adapter_name = default_adapter_name
@@ -337,5 +444,5 @@ class OutboundService:
                 description=description,
             )
             db.add(mapping)
-        db.flush()
+        await db.flush()
         return mapping
